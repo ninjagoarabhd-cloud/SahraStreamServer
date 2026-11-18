@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "1.9.22"
-    id("io.ktor.plugin") version "2.3.7"
+    kotlin("jvm") version "2.0.0" // تم تحديث Kotlin إلى إصدار أحدث
+    id("io.ktor.plugin") version "3.6.1" // تم تحديث Ktor إلى أحدث إصدار مستقر
     application
 }
 
