@@ -2,7 +2,7 @@ package com.sahra4ever
 
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.cio.CIO
-import io.ktor.client.request.header
+import io.ktor.client.request.*
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
@@ -38,7 +38,7 @@ private fun jsonEscape(s: String): String {
 }
 
 private suspend fun fetchHtml(url: String): String {
-    val response: HttpResponse = httpClient.request(url) {
+    val response: HttpResponse = httpClient.get(url) {
         header(HttpHeaders.UserAgent, USER_AGENT)
     }
     return response.bodyAsText()
