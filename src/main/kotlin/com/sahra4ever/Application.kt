@@ -1,74 +1,106 @@
 package com.sahra4ever
 
+import io.ktor.client.HttpClient
+import io.ktor.client.engine.cio.CIO
+import io.ktor.client.request.header
+import io.ktor.client.statement.HttpResponse
+import io.ktor.client.statement.bodyAsText
+import io.ktor.http.ContentType
+import io.ktor.http.HttpHeaders
+import io.ktor.server.application.*
 import io.ktor.server.engine.*
 import io.ktor.server.netty.*
-import io.ktor.server.application.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import io.ktor.client.*
-import io.ktor.client.engine.cio.*
-import io.ktor.client.request.*
-import io.ktor.client.statement.*
 import org.jsoup.Jsoup
-import org.jsoup.nodes.Document
+
+private const val USER_AGENT =
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+
+private val httpClient = HttpClient(CIO) {
+    followRedirects = true
+}
+
+private fun jsonEscape(s: String): String {
+    val sb = StringBuilder()
+    for (c in s) {
+        when (c) {
+            '"' -> sb.append("\\\"")
+            '\\' -> sb.append("\\\\")
+            '\n' -> sb.append("\\n")
+            '\r' -> sb.append("\\r")
+            '\t' -> sb.append("\\t")
+            else -> sb.append(c)
+        }
+    }
+    return sb.toString()
+}
+
+private suspend fun fetchHtml(url: String): String {
+    val response: HttpResponse = httpClient.request(url) {
+        header(HttpHeaders.UserAgent, USER_AGENT)
+    }
+    return response.bodyAsText()
+}
 
 fun main() {
-    embeddedServer(Netty, port = System.getenv("PORT")?.toIntOrNull() ?: 8080, host = "0.0.0.0") {
+    val port: Int = System.getenv("PORT")?.toIntOrNull() ?: 8080
+
+    embeddedServer(Netty, port = port, host = "0.0.0.0") {
         routing {
             get("/") {
                 call.respondText("Sahra4Ever Server is Running! 🚀")
             }
-            
+
             get("/api/search") {
-                val movieName = call.request.queryParameters["name"]
-                if (movieName == null) {
-                    call.respondText("Please provide a movie name: /api/search?name=Inception")
+                val movieName: String? = call.request.queryParameters["name"]
+                if (movieName.isNullOrBlank()) {
+                    call.respondText(
+                        "Please provide a movie name: /api/search?name=Inception"
+                    )
                     return@get
                 }
 
                 try {
-                    // استخدام Ktor Client لجلب الصفحة
-                    val client = HttpClient(CIO)
-                    val searchUrl = "https://arabseed.cam/?s=${movieName.replace(" ", "+")}"
-                    
-                    val response: HttpResponse = client.get(searchUrl) {
-                        header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                    }
-                    
-                    val html = response.readText()
-                    val doc: Document = Jsoup.parse(html)
+                    val searchUrl =
+                        "https://arabseed.cam/?s=" + movieName.trim().replace(" ", "+")
+                    val searchHtml: String = fetchHtml(searchUrl)
+                    val searchDoc = Jsoup.parse(searchHtml, searchUrl)
 
-                    // البحث عن أول نتيجة (هذا الـ class خاص بعرب سيد)
-                    val firstResult = doc.selectFirst(".movie-box a, .post-item a, .BoxItem a")
-                    
+                    val firstResult =
+                        searchDoc.selectFirst(".movie-box a, .post-item a, .BoxItem a")
+
                     if (firstResult == null) {
-                        call.respondText("""{"success": false, "message": "لم يتم العثور على الفيلم في عرب سيد"}""")
-                    } else {
-                        val moviePageUrl = firstResult.attr("href")
-                        
-                        // الدخول لصفحة الفيلم لاستخراج الـ iframe
-                        val moviePageResponse = client.get(moviePageUrl) {
-                            header("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
-                        }
-                        val movieHtml = moviePageResponse.readText()
-                        val movieDoc = Jsoup.parse(movieHtml)
-                        
-                        // البحث عن رابط الـ iframe (سيرفر المشاهدة)
-                        val iframe = movieDoc.selectFirst("iframe")
-                        val iframeUrl = iframe?.attr("src") ?: "لم يتم العثور على سيرفر مشاهدة"
-
-                        call.respondText("""
-                            {
-                                "success": true,
-                                "movie": "$movieName",
-                                "pageUrl": "$moviePageUrl",
-                                "embedUrl": "$iframeUrl"
-                            }
-                        """.trimIndent())
+                        call.respondText(
+                            "{\"success\": false, \"message\": \"لم يتم العثور على الفيلم في عرب سيد\"}",
+                            ContentType.Application.Json
+                        )
+                        return@get
                     }
-                    
+
+                    val moviePageUrl: String = firstResult.absUrl("href")
+                    val movieHtml: String = fetchHtml(moviePageUrl)
+                    val movieDoc = Jsoup.parse(movieHtml, moviePageUrl)
+
+                    val iframe = movieDoc.selectFirst("iframe")
+                    val iframeUrl: String = iframe?.absUrl("src")
+                        ?.takeIf { it.isNotBlank() }
+                        ?: "لم يتم العثور على سيرفر مشاهدة"
+
+                    val json = "{" +
+                        "\"success\": true, " +
+                        "\"movie\": \"" + jsonEscape(movieName) + "\", " +
+                        "\"pageUrl\": \"" + jsonEscape(moviePageUrl) + "\", " +
+                        "\"embedUrl\": \"" + jsonEscape(iframeUrl) + "\"" +
+                        "}"
+                    call.respondText(json, ContentType.Application.Json)
                 } catch (e: Exception) {
-                    call.respondText("""{"success": false, "error": "${e.message}"}""")
+                    val msg = jsonEscape(e.message ?: "Unknown error")
+                    call.respondText(
+                        "{\"success\": false, \"error\": \"" + msg + "\"}",
+                        ContentType.Application.Json
+                    )
                 }
             }
         }
