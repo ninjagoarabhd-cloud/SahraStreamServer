@@ -1,6 +1,6 @@
 plugins {
-    kotlin("jvm") version "2.0.0" // تم تحديث Kotlin إلى إصدار أحدث
-    id("io.ktor.plugin") version "3.6.1" // تم تحديث Ktor إلى أحدث إصدار مستقر
+    kotlin("jvm") version "2.0.0"
+    id("io.ktor.plugin") version "3.6.1"
     application
 }
 
@@ -11,14 +11,16 @@ repositories {
     mavenCentral()
 }
 
+kotlin {
+    jvmToolchain(17)
+}
+
 dependencies {
     implementation("io.ktor:ktor-server-core-jvm")
     implementation("io.ktor:ktor-server-netty-jvm")
     implementation("io.ktor:ktor-server-content-negotiation-jvm")
     implementation("io.ktor:ktor-serialization-kotlinx-json-jvm")
     implementation("ch.qos.logback:logback-classic:1.4.14")
-    
-    // مكتبات لسحب البيانات من المواقع (مثل Jsoup)
     implementation("org.jsoup:jsoup:1.17.2")
     implementation("io.ktor:ktor-client-core-jvm")
     implementation("io.ktor:ktor-client-cio-jvm")
@@ -31,5 +33,11 @@ application {
 ktor {
     fatJar {
         archiveFileName.set("server.jar")
+    }
+}
+
+tasks.withType<Jar> {
+    manifest {
+        attributes["Main-Class"] = "com.sahra4ever.ApplicationKt"
     }
 }
