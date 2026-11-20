@@ -63,7 +63,7 @@ fun main() {
                 val clean = call.request.queryParameters["clean"] == "1"
 
                 try {
-                    val url = "https://arabseed.cam/?s=" + name.trim().replace(" ", "+")
+                    val url = "https://arabseed.press/?s=" + name.trim().replace(" ", "+")
                     var html = fetchHtml(url)
 
                     if (clean) {
@@ -98,7 +98,7 @@ fun main() {
 
                 try {
                     val searchUrl =
-                        "https://arabseed.cam/?s=" + movieName.trim().replace(" ", "+")
+                        "https://arabseed.press/?s=" + movieName.trim().replace(" ", "+")
                     val searchHtml: String = fetchHtml(searchUrl)
                     val searchDoc = Jsoup.parse(searchHtml, searchUrl)
 
