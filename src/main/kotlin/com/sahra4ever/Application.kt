@@ -1,7 +1,8 @@
 package com.sahra4ever
 
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
+import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.*
 import io.ktor.client.request.*
 import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
@@ -15,11 +16,34 @@ import io.ktor.server.routing.*
 import org.jsoup.Jsoup
 
 private const val USER_AGENT =
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
 
-private val httpClient = HttpClient(CIO) {
+private val httpClient = HttpClient(OkHttp) {
     followRedirects = true
+    // إزالة ترويسة Accept-Charset لتجنب الحظر من Cloudflare
+    engine {
+        config {
+            // إعدادات إضافية إذا لزم الأمر
+        }
+    }
+    // إضافة ترويسات متصفح كاملة
+    defaultRequest {
+        header(HttpHeaders.UserAgent, USER_AGENT)
+        header(HttpHeaders.Accept, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
+        header(HttpHeaders.AcceptLanguage, "en-US,en;q=0.9,ar;q=0.8")
+        header(HttpHeaders.AcceptEncoding, "gzip, deflate, br")
+        header("Sec-Fetch-Dest", "document")
+        header("Sec-Fetch-Mode", "navigate")
+        header("Sec-Fetch-Site", "none")
+        header("Sec-Fetch-User", "?1")
+        header("Upgrade-Insecure-Requests", "1")
+    }
+    // إزالة ترويسة Accept-Charset التي يضيفها Ktor افتراضيًا
+    install(createClientPlugin("RemoveAcceptCharset") {
+        on(Send) { request ->
+            request.headers.remove(HttpHeaders.AcceptCharset)
+        }
+    })
 }
 
 private fun jsonEscape(s: String): String {
@@ -38,9 +62,7 @@ private fun jsonEscape(s: String): String {
 }
 
 private suspend fun fetchHtml(url: String): String {
-    val response: HttpResponse = httpClient.get(url) {
-        header(HttpHeaders.UserAgent, USER_AGENT)
-    }
+    val response: HttpResponse = httpClient.get(url)
     return response.bodyAsText()
 }
 
@@ -53,9 +75,6 @@ fun main() {
                 call.respondText("Sahra4Ever Server is Running! 🚀")
             }
 
-            // ==========================================
-            // 👇 كود التشخيص الجديد الذي أضافه كلود 👇
-            // ==========================================
             get("/api/debug") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 val offset = call.request.queryParameters["offset"]?.toIntOrNull()?.coerceAtLeast(0) ?: 0
@@ -83,27 +102,20 @@ fun main() {
                     call.respondText("ERROR: ${e.message}", ContentType.Text.Plain)
                 }
             }
-            // ==========================================
-            // 👆 نهاية كود التشخيص 👆
-            // ==========================================
 
             get("/api/search") {
                 val movieName: String? = call.request.queryParameters["name"]
                 if (movieName.isNullOrBlank()) {
-                    call.respondText(
-                        "Please provide a movie name: /api/search?name=Inception"
-                    )
+                    call.respondText("Please provide a movie name: /api/search?name=Inception")
                     return@get
                 }
 
                 try {
-                    val searchUrl =
-                        "https://arabseed.press/?s=" + movieName.trim().replace(" ", "+")
+                    val searchUrl = "https://arabseed.press/?s=" + movieName.trim().replace(" ", "+")
                     val searchHtml: String = fetchHtml(searchUrl)
                     val searchDoc = Jsoup.parse(searchHtml, searchUrl)
 
-                    val firstResult =
-                        searchDoc.selectFirst(".movie-box a, .post-item a, .BoxItem a")
+                    val firstResult = searchDoc.selectFirst(".movie-box a, .post-item a, .BoxItem a, .post-item h2 a")
 
                     if (firstResult == null) {
                         call.respondText(
@@ -118,9 +130,7 @@ fun main() {
                     val movieDoc = Jsoup.parse(movieHtml, moviePageUrl)
 
                     val iframe = movieDoc.selectFirst("iframe")
-                    val iframeUrl: String = iframe?.absUrl("src")
-                        ?.takeIf { it.isNotBlank() }
-                        ?: "لم يتم العثور على سيرفر مشاهدة"
+                    val iframeUrl: String = iframe?.absUrl("src")?.takeIf { it.isNotBlank() } ?: "لم يتم العثور على سيرفر مشاهدة"
 
                     val json = "{" +
                         "\"success\": true, " +
@@ -131,10 +141,7 @@ fun main() {
                     call.respondText(json, ContentType.Application.Json)
                 } catch (e: Exception) {
                     val msg = jsonEscape(e.message ?: "Unknown error")
-                    call.respondText(
-                        "{\"success\": false, \"error\": \"" + msg + "\"}",
-                        ContentType.Application.Json
-                    )
+                    call.respondText("{\"success\": false, \"error\": \"" + msg + "\"}", ContentType.Application.Json)
                 }
             }
         }
