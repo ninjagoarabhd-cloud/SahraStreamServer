@@ -53,6 +53,40 @@ fun main() {
                 call.respondText("Sahra4Ever Server is Running! 🚀")
             }
 
+            // ==========================================
+            // 👇 كود التشخيص الجديد الذي أضافه كلود 👇
+            // ==========================================
+            get("/api/debug") {
+                val name = call.request.queryParameters["name"] ?: "Inception"
+                val offset = call.request.queryParameters["offset"]?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+                val limit = call.request.queryParameters["limit"]?.toIntOrNull()?.coerceIn(1, 20000) ?: 5000
+                val clean = call.request.queryParameters["clean"] == "1"
+
+                try {
+                    val url = "https://arabseed.cam/?s=" + name.trim().replace(" ", "+")
+                    var html = fetchHtml(url)
+
+                    if (clean) {
+                        val doc = Jsoup.parse(html, url)
+                        doc.select("script, style, svg, noscript, link, meta").remove()
+                        html = doc.body().html()
+                    }
+
+                    val end = minOf(html.length, offset + limit)
+                    val slice = if (offset >= html.length) "" else html.substring(offset, end)
+
+                    call.respondText(
+                        "URL: $url\nTotal length: ${html.length}\nShowing: $offset..$end\n\n$slice",
+                        ContentType.Text.Plain
+                    )
+                } catch (e: Exception) {
+                    call.respondText("ERROR: ${e.message}", ContentType.Text.Plain)
+                }
+            }
+            // ==========================================
+            // 👆 نهاية كود التشخيص 👆
+            // ==========================================
+
             get("/api/search") {
                 val movieName: String? = call.request.queryParameters["name"]
                 if (movieName.isNullOrBlank()) {
