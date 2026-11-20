@@ -20,13 +20,6 @@ private const val USER_AGENT =
 
 private val httpClient = HttpClient(OkHttp) {
     followRedirects = true
-    // إزالة ترويسة Accept-Charset لتجنب الحظر من Cloudflare
-    engine {
-        config {
-            // إعدادات إضافية إذا لزم الأمر
-        }
-    }
-    // إضافة ترويسات متصفح كاملة
     defaultRequest {
         header(HttpHeaders.UserAgent, USER_AGENT)
         header(HttpHeaders.Accept, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8")
@@ -38,10 +31,11 @@ private val httpClient = HttpClient(OkHttp) {
         header("Sec-Fetch-User", "?1")
         header("Upgrade-Insecure-Requests", "1")
     }
-    // إزالة ترويسة Accept-Charset التي يضيفها Ktor افتراضيًا
+    // الطريقة الصحيحة لإزالة ترويسة Accept-Charset
     install(createClientPlugin("RemoveAcceptCharset") {
         on(Send) { request ->
             request.headers.remove(HttpHeaders.AcceptCharset)
+            this.proceed(request)
         }
     })
 }
