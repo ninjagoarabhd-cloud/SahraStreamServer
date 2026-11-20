@@ -16,14 +16,22 @@ kotlin {
 }
 
 dependencies {
+    // --- Ktor Server ---
     implementation("io.ktor:ktor-server-core-jvm")
     implementation("io.ktor:ktor-server-netty-jvm")
     implementation("io.ktor:ktor-server-content-negotiation-jvm")
     implementation("io.ktor:ktor-serialization-kotlinx-json-jvm")
+    
+    // --- Logging & Scraping ---
     implementation("ch.qos.logback:logback-classic:1.4.14")
     implementation("org.jsoup:jsoup:1.17.2")
+    
+    // --- Ktor Client ---
     implementation("io.ktor:ktor-client-core-jvm")
-    implementation("io.ktor:ktor-client-cio-jvm")
+    implementation("io.ktor:ktor-client-okhttp-jvm") // <--- تمت إضافة OkHttp هنا
+    
+    // ملاحظة: يمكنك الإبقاء على ktor-client-cio-jvm أو حذفه، سنستخدم OkHttp في الأكواد القادمة لأنه أفضل في التعامل مع الـ Headers وإعادة التوجيه.
+    implementation("io.ktor:ktor-client-cio-jvm") 
 }
 
 application {
