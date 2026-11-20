@@ -1,10 +1,9 @@
 package com.sahra4ever
 
 import io.ktor.client.HttpClient
-import io.ktor.client.engine.okhttp.OkHttp // 1. تم التغيير من CIO إلى OkHttp
-import io.ktor.client.plugins.DefaultRequest // 2. إضافة ضرورية للترويسات العامة
+import io.ktor.client.engine.okhttp.OkHttp
+import io.ktor.client.plugins.DefaultRequest
 import io.ktor.client.request.get
-import io.ktor.client.statement.HttpResponse
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -19,16 +18,13 @@ private const val USER_AGENT =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 " +
     "(KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-// 3. تكوين العميل باستخدام OkHttp وترويسات المتصفح الحقيقي
 private val httpClient = HttpClient(OkHttp) {
     engine {
         config {
-            followRedirects(true) // السماح بإعادة التوجيه (مهم لـ Cloudflare)
-            retryOnConnectionFailure(true) // إعادة المحاولة عند فشل الاتصال
+            followRedirects(true)
+            retryOnConnectionFailure(true)
         }
     }
-    
-    // إضافة الترويسات بشكل آمن ومضمون بدون Plugins معقدة
     install(DefaultRequest) {
         header(HttpHeaders.UserAgent, USER_AGENT)
         header(HttpHeaders.Accept, "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8")
@@ -39,8 +35,7 @@ private val httpClient = HttpClient(OkHttp) {
         header("Sec-Fetch-User", "?1")
         header(HttpHeaders.CacheControl, "no-cache")
         header(HttpHeaders.Pragma, "no-cache")
-        header(HttpHeaders.UpgradeInsecureRequests, "1")
-        // تم استبعاد Accept-Charset عمداً كما طلبت
+        header("Upgrade-Insecure-Requests", "1") // ✅ تم الإصلاح: استخدام string literal
     }
 }
 
@@ -60,8 +55,7 @@ private fun jsonEscape(s: String): String {
 }
 
 private suspend fun fetchHtml(url: String): String {
-    // الترويسات مضافة تلقائياً عبر DefaultRequest، لكن يمكن تأكيدها هنا إذا لزم الأمر
-    val response: HttpResponse = httpClient.get(url)
+    val response = httpClient.get(url)
     return response.bodyAsText()
 }
 
@@ -74,9 +68,6 @@ fun main() {
                 call.respondText("Sahra4Ever Server is Running! 🚀")
             }
 
-            // ==========================================
-            // 👇 كود التشخيص 👇
-            // ==========================================
             get("/api/debug") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 val offset = call.request.queryParameters["offset"]?.toIntOrNull()?.coerceAtLeast(0) ?: 0
@@ -105,9 +96,6 @@ fun main() {
                 }
             }
 
-            // ==========================================
-            // 👇 كود البحث الرئيسي 👇
-            // ==========================================
             get("/api/search") {
                 val movieName: String? = call.request.queryParameters["name"]
                 if (movieName.isNullOrBlank()) {
@@ -122,7 +110,6 @@ fun main() {
                     val searchUrl = "https://arabseed.cam/?s=" + movieName.trim().replace(" ", "+")
                     val searchHtml: String = fetchHtml(searchUrl)
                     
-                    // فحص سريع: هل تم حظرنا؟
                     if (searchHtml.length < 500) {
                         call.respondText(
                             "{\"success\": false, \"error\": \"Cloudflare Block Detected (Page length: ${searchHtml.length})\"}",
