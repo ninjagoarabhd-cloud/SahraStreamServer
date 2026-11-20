@@ -3,7 +3,7 @@ package com.sahra4ever
 import io.ktor.client.HttpClient
 import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.DefaultRequest
-import io.ktor.client.request.get
+import io.ktor.client.request.* // ⭐ هذا هو الاستيراد الناقص الذي سبب الفشل!
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
@@ -35,7 +35,7 @@ private val httpClient = HttpClient(OkHttp) {
         header("Sec-Fetch-User", "?1")
         header(HttpHeaders.CacheControl, "no-cache")
         header(HttpHeaders.Pragma, "no-cache")
-        header("Upgrade-Insecure-Requests", "1") // ✅ تم الإصلاح: استخدام string literal
+        header("Upgrade-Insecure-Requests", "1")
     }
 }
 
