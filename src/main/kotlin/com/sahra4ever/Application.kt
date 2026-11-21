@@ -65,37 +65,54 @@ fun main() {
         routing {
             get("/") { call.respondText("Sahra4Ever Server Running 🚀") }
 
+            // يرجع playUrl + altServers (طبقات arabseed فقط)
+            get("/api/watch") {
+                val name = call.request.queryParameters["name"] ?: "Inception"
+                try {
+                    val searchHtml = fetchHtml("$BASE/?s=" + name.trim().replace(" ", "+"))
+                    val movieUrl = findMovieLink(Jsoup.parse(searchHtml, BASE), name)
+                    if (movieUrl == null) { call.respondText("{\"success\":false,\"error\":\"NO_MOVIE_LINK\"}", ContentType.Application.Json); return@get }
+                    val movieHtml = fetchHtml(movieUrl, BASE)
+                    val watchUrl = Jsoup.parse(movieHtml, movieUrl).selectFirst("a.watch__btn")?.absUrl("href")
+                        ?: (movieUrl.trimEnd('/') + "/watch")
+                    val watchHtml = fetchHtml(watchUrl, movieUrl)
+                    val watchDoc = Jsoup.parse(watchHtml, watchUrl)
+                    val playUrl = watchDoc.selectFirst("iframe#videoIframe")?.absUrl("src")
+                    if (playUrl == null) { call.respondText("{\"success\":false,\"error\":\"NO_IFRAME\"}", ContentType.Application.Json); return@get }
+                    val altServers = watchDoc.select("#watch li[data-link]").mapNotNull { it.attr("data-link").takeIf { s -> s.isNotBlank() } }
+                    val json = "{\"success\":true,\"playUrl\":\"" + jsonEscape(playUrl) + "\",\"altServers\":[" +
+                        altServers.joinToString(",") { "\"" + jsonEscape(it) + "\"" } + "]}"
+                    call.respondText(json, ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"success\":false,\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // سلسلة كاملة + اختبار m3u8 (للتشخيص)
             get("/api/extract") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
                     val searchHtml = fetchHtml("$BASE/?s=" + name.trim().replace(" ", "+"))
                     val movieUrl = findMovieLink(Jsoup.parse(searchHtml, BASE), name)
                     if (movieUrl == null) { call.respondText("{\"step\":\"search\",\"error\":\"NO_MOVIE_LINK\"}", ContentType.Application.Json); return@get }
-
                     val movieHtml = fetchHtml(movieUrl, BASE)
                     val watchUrl = Jsoup.parse(movieHtml, movieUrl).selectFirst("a.watch__btn")?.absUrl("href")
                         ?: (movieUrl.trimEnd('/') + "/watch")
-
                     val watchHtml = fetchHtml(watchUrl, movieUrl)
                     val watchDoc = Jsoup.parse(watchHtml, watchUrl)
                     val playUrl = watchDoc.selectFirst("iframe#videoIframe")?.absUrl("src")
                     if (playUrl == null) { call.respondText("{\"step\":\"watch\",\"error\":\"NO_IFRAME\"}", ContentType.Application.Json); return@get }
                     val altServers = watchDoc.select("#watch li[data-link]").mapNotNull { it.attr("data-link").takeIf { s -> s.isNotBlank() } }
-
                     val playHtml = fetchHtml(playUrl, watchUrl)
                     val eUrl = Jsoup.parse(playHtml, playUrl).select("iframe[src]").map { it.absUrl("src") }.firstOrNull { it.contains("/e/") }
                     if (eUrl == null) { call.respondText("{\"step\":\"play\",\"error\":\"NO_E_IFRAME\"}", ContentType.Application.Json); return@get }
-
                     val eHtml = fetchHtml(eUrl, playUrl)
                     val hex = Regex("""const\s+Mohix\s*=\s*"([0-9a-fA-F]+)"""").find(eHtml)?.groupValues?.get(1)
                     if (hex == null) { call.respondText("{\"step\":\"e\",\"error\":\"NO_HEX\"}", ContentType.Application.Json); return@get }
                     val m3u8 = hexToUrl(hex)
-
-                    // اختبار جلب الـ m3u8 من نفس IP السيرفر
                     val testResp = httpClient.get(m3u8) { header("Referer", "https://govid.live/") }
                     val testBody = testResp.bodyAsText()
                     val isPlaylist = testBody.trimStart().startsWith("#EXTM3U")
-
                     val json = "{" +
                         "\"success\":true," +
                         "\"m3u8\":\"${jsonEscape(m3u8)}\"," +
