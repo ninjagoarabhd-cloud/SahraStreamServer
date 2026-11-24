@@ -20,7 +20,6 @@ import java.net.URI
 private const val UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-// نطاق بوابة + نطاقات احتياطية
 private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
 private var BASE = ARABSEED_DOMAINS.first()
 
@@ -43,7 +42,6 @@ private fun jsonEscape(s: String): String {
     return sb.toString()
 }
 
-// ✅ اكتشاف النطاق الحي: يتبع redirects + يفحص روابط الصفحة لكشف meta/JS redirect
 private var cachedFinalBase: Pair<String, Long>? = null
 private val BASE_LOCK = Any()
 
@@ -54,7 +52,6 @@ private suspend fun resolveFinalBase(): String {
         cachedFinalBase?.let { (base, ts) -> if (now - ts < 600_000) return base }
     }
 
-    // GET على البوابة (يتبع 3xx redirects تلقائياً)
     val resp = httpClient.get("$BASE/")
     val finalUrl = resp.request.url.toString()
     var host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { BASE }
@@ -65,7 +62,6 @@ private suspend fun resolveFinalBase(): String {
         throw IllegalStateException("CLOUDFLARE on final base $host")
     }
 
-    // 🔍 اكتشاف meta/JS redirect: نتبنى النطاق الذي تشير إليه أغلبية روابط الصفحة
     val doc = Jsoup.parse(body, host)
     val counts = mutableMapOf<String, Int>()
     doc.select("a[href]").forEach { a ->
@@ -82,7 +78,7 @@ private suspend fun resolveFinalBase(): String {
 
     synchronized(BASE_LOCK) {
         cachedFinalBase = host to now
-        BASE = host // تحديث الـ BASE لباقي الدوال
+        BASE = host
     }
     return host
 }
@@ -134,9 +130,11 @@ fun main() {
                 try {
                     val base = resolveFinalBase()
                     val searchUrl = "$base/?s=" + name.trim().replace(" ", "+")
+                    // ✅ الإصلاح: إضافة Referer لتجاوز Cloudflare
                     val resp = httpClient.get(searchUrl) {
                         header("User-Agent", UA)
                         header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        header("Referer", "$base/")
                     }
                     val html = resp.bodyAsText()
                     val doc = Jsoup.parse(html, base)
