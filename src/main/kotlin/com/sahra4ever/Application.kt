@@ -5,6 +5,7 @@ import io.ktor.client.engine.okhttp.OkHttp
 import io.ktor.client.plugins.DefaultRequest
 import io.ktor.client.request.*
 import io.ktor.client.statement.bodyAsText
+import io.ktor.client.statement.request
 import io.ktor.http.ContentType
 import io.ktor.http.HttpHeaders
 import io.ktor.server.application.*
@@ -14,13 +15,13 @@ import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
+import java.net.URI
 
 private const val UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-// نطاق عرب سيد من arprov
-private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
-private var BASE = ARABSEED_DOMAINS.first()
+// نطاق بوابة واحد فقط — السيرفر سيتبع redirects منه ليكتشف النطاق الحي
+private const val GATEWAY = "https://arabseed.trade"
 
 private val httpClient = HttpClient(OkHttp) {
     engine { config { followRedirects(true); retryOnConnectionFailure(true) } }
@@ -41,6 +42,33 @@ private fun jsonEscape(s: String): String {
     return sb.toString()
 }
 
+// ✅ اكتشاف النطاق الحي تلقائياً بمتابعة redirects + كاش 10 دقائق
+private var cachedFinalBase: Pair<String, Long>? = null
+private val BASE_LOCK = Any()
+
+private suspend fun resolveFinalBase(): String {
+    val now = System.currentTimeMillis()
+    cachedFinalBase?.let { (base, ts) -> if (now - ts < 600_000) return base }
+    synchronized(BASE_LOCK) {
+        cachedFinalBase?.let { (base, ts) -> if (now - ts < 600_000) return base }
+    }
+
+    // GET على البوابة — OkHttp يتبع redirects تلقائياً
+    val resp = httpClient.get("$GATEWAY/")
+    val finalUrl = resp.request.url.toString()
+    val host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { GATEWAY }
+
+    // تحقق من عدم وجود تحدي Cloudflare
+    val body = resp.bodyAsText()
+    val low = body.lowercase()
+    if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
+        throw IllegalStateException("CLOUDFLARE on final base $host")
+    }
+
+    synchronized(BASE_LOCK) { cachedFinalBase = host to now }
+    return host
+}
+
 private suspend fun fetchHtml(url: String, referer: String? = null): String {
     val resp = httpClient.get(url) { if (referer != null) header("Referer", referer) }
     val body = resp.bodyAsText()
@@ -51,25 +79,11 @@ private suspend fun fetchHtml(url: String, referer: String? = null): String {
     return body
 }
 
-// يكتشف النطاق الحي من القائمة
-private suspend fun resolveBase(): String {
-    for (d in listOf(BASE) + ARABSEED_DOMAINS) {
-        try {
-            val body = httpClient.get("$d/").bodyAsText()
-            val low = body.lowercase()
-            if (body.length > 500 && !low.contains("just a moment") &&
-                !low.contains("challenge-platform") && !low.contains("cf-chl")) {
-                BASE = d; return d
-            }
-        } catch (_: Exception) {}
-    }
-    return BASE
-}
-
-private fun findMovieLink(doc: Document, query: String): String? {
+// ✅ مطابقة مستقلة عن النطاق — تقبل أي رابط خارجي يبدأ بـ http
+private fun findMovieLink(doc: Document, query: String, base: String): String? {
     val byText = doc.select("a[href]").firstOrNull { a ->
         val href = a.absUrl("href"); val txt = a.text()
-        href.startsWith(BASE) && href.removePrefix(BASE).trim('/').isNotEmpty() &&
+        href.startsWith(base) && href.removePrefix(base).trim('/').isNotEmpty() &&
             !href.contains("/category/") && !href.contains("/home") &&
             !href.contains("/page/") && !href.contains("/tag/") &&
             txt.contains(query, ignoreCase = true)
@@ -87,7 +101,17 @@ fun main() {
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
     embeddedServer(Netty, port = port, host = "0.0.0.0") {
         routing {
-            get("/") { call.respondText("Sahra4Ever Server Running 🚀") }
+            get("/") { call.respondText("Sahra4Ever Server Running 🚀\nGateway: $GATEWAY") }
+
+            // endpoint تشخيصي: يظهر النطاق الحي المُكتشف
+            get("/api/resolve") {
+                try {
+                    val base = resolveFinalBase()
+                    call.respondText("{\"gateway\":\"$GATEWAY\",\"finalBase\":\"$base\"}", ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
 
             get("/api/watch") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
@@ -96,9 +120,9 @@ fun main() {
                     if (now - ts < 600_000) { call.respondText(json, ContentType.Application.Json); return@get }
                 }
                 try {
-                    val base = resolveBase()
+                    val base = resolveFinalBase()
                     val searchHtml = fetchHtml("$base/?s=" + name.trim().replace(" ", "+"), "$base/")
-                    val movieUrl = findMovieLink(Jsoup.parse(searchHtml, base), name)
+                    val movieUrl = findMovieLink(Jsoup.parse(searchHtml, base), name, base)
                     if (movieUrl == null) { call.respondText("{\"success\":false,\"error\":\"NO_MOVIE_LINK\"}", ContentType.Application.Json); return@get }
                     val movieHtml = fetchHtml(movieUrl, "$base/")
                     val watchUrl = Jsoup.parse(movieHtml, movieUrl).selectFirst("a.watch__btn")?.absUrl("href")
@@ -108,7 +132,7 @@ fun main() {
                     val playUrl = watchDoc.selectFirst("iframe#videoIframe")?.absUrl("src")
                     if (playUrl == null) { call.respondText("{\"success\":false,\"error\":\"NO_IFRAME\"}", ContentType.Application.Json); return@get }
                     val altServers = watchDoc.select("#watch li[data-link]").mapNotNull { it.attr("data-link").takeIf { s -> s.isNotBlank() } }
-                    val json = "{\"success\":true,\"playUrl\":\"" + jsonEscape(playUrl) + "\",\"altServers\":[" +
+                    val json = "{\"success\":true,\"base\":\"" + jsonEscape(base) + "\",\"playUrl\":\"" + jsonEscape(playUrl) + "\",\"altServers\":[" +
                         altServers.joinToString(",") { "\"" + jsonEscape(it) + "\"" } + "]}"
                     watchCache[name] = json to now
                     call.respondText(json, ContentType.Application.Json)
@@ -120,10 +144,10 @@ fun main() {
             get("/api/extract") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
-                    val base = resolveBase()
+                    val base = resolveFinalBase()
                     val searchHtml = fetchHtml("$base/?s=" + name.trim().replace(" ", "+"), "$base/")
-                    val movieUrl = findMovieLink(Jsoup.parse(searchHtml, base), name)
-                    if (movieUrl == null) { call.respondText("{\"step\":\"search\",\"error\":\"NO_MOVIE_LINK\"}", ContentType.Application.Json); return@get }
+                    val movieUrl = findMovieLink(Jsoup.parse(searchHtml, base), name, base)
+                    if (movieUrl == null) { call.respondText("{\"step\":\"search\",\"error\":\"NO_MOVIE_LINK\",\"base\":\"$base\"}", ContentType.Application.Json); return@get }
                     val movieHtml = fetchHtml(movieUrl, "$base/")
                     val watchUrl = Jsoup.parse(movieHtml, movieUrl).selectFirst("a.watch__btn")?.absUrl("href")
                         ?: (movieUrl.trimEnd('/') + "/watch")
@@ -144,6 +168,7 @@ fun main() {
                     val isPlaylist = testBody.trimStart().startsWith("#EXTM3U")
                     val json = "{" +
                         "\"success\":true," +
+                        "\"base\":\"${jsonEscape(base)}\"," +
                         "\"m3u8\":\"${jsonEscape(m3u8)}\"," +
                         "\"altServers\":[${altServers.joinToString(",") { "\"" + jsonEscape(it) + "\"" }}]," +
                         "\"m3u8Test\":{\"code\":${testResp.status.value},\"isPlaylist\":$isPlaylist,\"preview\":\"${jsonEscape(testBody.take(150))}\"}" +
