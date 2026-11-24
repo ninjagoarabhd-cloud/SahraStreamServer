@@ -20,8 +20,9 @@ import java.net.URI
 private const val UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
 
-// نطاق بوابة واحد فقط — السيرفر سيتبع redirects منه ليكتشف النطاق الحي
-private const val GATEWAY = "https://arabseed.trade"
+// نطاق بوابة + نطاقات احتياطية
+private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
+private var BASE = ARABSEED_DOMAINS.first()
 
 private val httpClient = HttpClient(OkHttp) {
     engine { config { followRedirects(true); retryOnConnectionFailure(true) } }
@@ -42,7 +43,7 @@ private fun jsonEscape(s: String): String {
     return sb.toString()
 }
 
-// ✅ اكتشاف النطاق الحي تلقائياً بمتابعة redirects + كاش 10 دقائق
+// ✅ اكتشاف النطاق الحي: يتبع redirects + يفحص روابط الصفحة لكشف meta/JS redirect
 private var cachedFinalBase: Pair<String, Long>? = null
 private val BASE_LOCK = Any()
 
@@ -53,9 +54,10 @@ private suspend fun resolveFinalBase(): String {
         cachedFinalBase?.let { (base, ts) -> if (now - ts < 600_000) return base }
     }
 
-    val resp = httpClient.get("$GATEWAY/")
+    // GET على البوابة (يتبع 3xx redirects تلقائياً)
+    val resp = httpClient.get("$BASE/")
     val finalUrl = resp.request.url.toString()
-    val host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { GATEWAY }
+    var host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { BASE }
 
     val body = resp.bodyAsText()
     val low = body.lowercase()
@@ -63,7 +65,25 @@ private suspend fun resolveFinalBase(): String {
         throw IllegalStateException("CLOUDFLARE on final base $host")
     }
 
-    synchronized(BASE_LOCK) { cachedFinalBase = host to now }
+    // 🔍 اكتشاف meta/JS redirect: نتبنى النطاق الذي تشير إليه أغلبية روابط الصفحة
+    val doc = Jsoup.parse(body, host)
+    val counts = mutableMapOf<String, Int>()
+    doc.select("a[href]").forEach { a ->
+        val href = a.absUrl("href")
+        if (href.startsWith("http")) {
+            val h = try { URI(href).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { null }
+            if (h != null) counts[h] = (counts[h] ?: 0) + 1
+        }
+    }
+    val top = counts.maxByOrNull { it.value }?.key
+    if (top != null && top != host && (counts[top] ?: 0) >= 5) {
+        host = top
+    }
+
+    synchronized(BASE_LOCK) {
+        cachedFinalBase = host to now
+        BASE = host // تحديث الـ BASE لباقي الدوال
+    }
     return host
 }
 
@@ -98,19 +118,17 @@ fun main() {
     val port = System.getenv("PORT")?.toIntOrNull() ?: 8080
     embeddedServer(Netty, port = port, host = "0.0.0.0") {
         routing {
-            get("/") { call.respondText("Sahra4Ever Server Running 🚀\nGateway: $GATEWAY") }
+            get("/") { call.respondText("Sahra4Ever Server Running 🚀\nCurrent base: $BASE") }
 
-            // endpoint تشخيصي: يظهر النطاق الحي المُكتشف
             get("/api/resolve") {
                 try {
                     val base = resolveFinalBase()
-                    call.respondText("{\"gateway\":\"$GATEWAY\",\"finalBase\":\"$base\"}", ContentType.Application.Json)
+                    call.respondText("{\"currentBase\":\"$base\"}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
             }
 
-            // 🔍 endpoint تشخيصي جديد: يعرض ما يحدث في البحث بالضبط
             get("/api/debug-search") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
