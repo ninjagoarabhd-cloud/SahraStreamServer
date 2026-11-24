@@ -23,8 +23,17 @@ private const val UA =
 private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
 private var BASE = ARABSEED_DOMAINS.first()
 
+// ✅ التعديل 1: مهلات سخية (connect 15s / read 40s / write 20s)
 private val httpClient = HttpClient(OkHttp) {
-    engine { config { followRedirects(true); retryOnConnectionFailure(true) } }
+    engine {
+        config {
+            followRedirects(true)
+            retryOnConnectionFailure(true)
+            connectTimeout(15, java.util.concurrent.TimeUnit.SECONDS)
+            readTimeout(40, java.util.concurrent.TimeUnit.SECONDS)
+            writeTimeout(20, java.util.concurrent.TimeUnit.SECONDS)
+        }
+    }
     install(DefaultRequest) {
         header(HttpHeaders.UserAgent, UA)
         header(HttpHeaders.Accept, "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
@@ -83,14 +92,24 @@ private suspend fun resolveFinalBase(): String {
     return host
 }
 
+// ✅ التعديل 2: إعادة محاولة داخلية 3 مرات لكل طلب
 private suspend fun fetchHtml(url: String, referer: String? = null): String {
-    val resp = httpClient.get(url) { if (referer != null) header("Referer", referer) }
-    val body = resp.bodyAsText()
-    val low = body.lowercase()
-    if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
-        throw IllegalStateException("CLOUDFLARE len=${body.length} @ $url")
+    var last: Exception? = null
+    for (i in 0 until 3) {
+        try {
+            val resp = httpClient.get(url) { if (referer != null) header("Referer", referer) }
+            val body = resp.bodyAsText()
+            val low = body.lowercase()
+            if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
+                throw IllegalStateException("CLOUDFLARE len=${body.length} @ $url")
+            }
+            return body
+        } catch (e: Exception) {
+            last = e
+            kotlinx.coroutines.delay(700L * (i + 1))
+        }
     }
-    return body
+    throw last ?: IllegalStateException("fetch failed @ $url")
 }
 
 private fun findMovieLink(doc: Document, query: String, base: String): String? {
@@ -130,7 +149,6 @@ fun main() {
                 try {
                     val base = resolveFinalBase()
                     val searchUrl = "$base/?s=" + name.trim().replace(" ", "+")
-                    // ✅ الإصلاح: إضافة Referer لتجاوز Cloudflare
                     val resp = httpClient.get(searchUrl) {
                         header("User-Agent", UA)
                         header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
