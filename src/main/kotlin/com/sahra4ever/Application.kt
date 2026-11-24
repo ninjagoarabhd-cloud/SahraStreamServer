@@ -53,12 +53,10 @@ private suspend fun resolveFinalBase(): String {
         cachedFinalBase?.let { (base, ts) -> if (now - ts < 600_000) return base }
     }
 
-    // GET على البوابة — OkHttp يتبع redirects تلقائياً
     val resp = httpClient.get("$GATEWAY/")
     val finalUrl = resp.request.url.toString()
     val host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { GATEWAY }
 
-    // تحقق من عدم وجود تحدي Cloudflare
     val body = resp.bodyAsText()
     val low = body.lowercase()
     if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
@@ -79,7 +77,6 @@ private suspend fun fetchHtml(url: String, referer: String? = null): String {
     return body
 }
 
-// ✅ مطابقة مستقلة عن النطاق — تقبل أي رابط خارجي يبدأ بـ http
 private fun findMovieLink(doc: Document, query: String, base: String): String? {
     val byText = doc.select("a[href]").firstOrNull { a ->
         val href = a.absUrl("href"); val txt = a.text()
@@ -108,6 +105,44 @@ fun main() {
                 try {
                     val base = resolveFinalBase()
                     call.respondText("{\"gateway\":\"$GATEWAY\",\"finalBase\":\"$base\"}", ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // 🔍 endpoint تشخيصي جديد: يعرض ما يحدث في البحث بالضبط
+            get("/api/debug-search") {
+                val name = call.request.queryParameters["name"] ?: "Inception"
+                try {
+                    val base = resolveFinalBase()
+                    val searchUrl = "$base/?s=" + name.trim().replace(" ", "+")
+                    val resp = httpClient.get(searchUrl) {
+                        header("User-Agent", UA)
+                        header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                    }
+                    val html = resp.bodyAsText()
+                    val doc = Jsoup.parse(html, base)
+
+                    val allLinks = doc.select("a[href]").take(50).map { a ->
+                        val href = a.absUrl("href")
+                        val txt = a.text().take(80)
+                        "$href | $txt"
+                    }
+
+                    val containsQuery = html.lowercase().contains(name.lowercase())
+                    val movieUrl = findMovieLink(doc, name, base)
+
+                    val json = "{" +
+                        "\"status\":${resp.status.value}," +
+                        "\"finalBase\":\"${jsonEscape(base)}\"," +
+                        "\"searchUrl\":\"${jsonEscape(searchUrl)}\"," +
+                        "\"htmlLen\":${html.length}," +
+                        "\"containsQuery\":$containsQuery," +
+                        "\"linksCount\":${allLinks.size}," +
+                        "\"sampleLinks\":[${allLinks.joinToString(",") { "\"${jsonEscape(it)}\"" }}]," +
+                        "\"foundMovie\":" + (if (movieUrl != null) "\"${jsonEscape(movieUrl)}\"" else "null") +
+                        "}"
+                    call.respondText(json, ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
