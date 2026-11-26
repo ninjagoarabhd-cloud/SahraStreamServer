@@ -23,7 +23,6 @@ private const val UA =
 private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
 private var BASE = ARABSEED_DOMAINS.first()
 
-// ✅ التعديل 1: مهلات سخية (connect 15s / read 40s / write 20s)
 private val httpClient = HttpClient(OkHttp) {
     engine {
         config {
@@ -92,7 +91,6 @@ private suspend fun resolveFinalBase(): String {
     return host
 }
 
-// ✅ التعديل 2: إعادة محاولة داخلية 3 مرات لكل طلب
 private suspend fun fetchHtml(url: String, referer: String? = null): String {
     var last: Exception? = null
     for (i in 0 until 3) {
@@ -182,6 +180,7 @@ fun main() {
                 }
             }
 
+            // ⚡ التعديل: تخطي صفحة الفيلم عندما يكون رابط المشاهدة متوقعاً
             get("/api/watch") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 val now = System.currentTimeMillis()
@@ -193,11 +192,22 @@ fun main() {
                     val searchHtml = fetchHtml("$base/?s=" + name.trim().replace(" ", "+"), "$base/")
                     val movieUrl = findMovieLink(Jsoup.parse(searchHtml, base), name, base)
                     if (movieUrl == null) { call.respondText("{\"success\":false,\"error\":\"NO_MOVIE_LINK\"}", ContentType.Application.Json); return@get }
-                    val movieHtml = fetchHtml(movieUrl, "$base/")
-                    val watchUrl = Jsoup.parse(movieHtml, movieUrl).selectFirst("a.watch__btn")?.absUrl("href")
-                        ?: (movieUrl.trimEnd('/') + "/watch")
-                    val watchHtml = fetchHtml(watchUrl, movieUrl)
-                    val watchDoc = Jsoup.parse(watchHtml, watchUrl)
+
+                    // ⚡ جرّب رابط المشاهدة المباشر أولاً (يوفر طلب صفحة الفيلم ~1 ثانية)
+                    val guess = movieUrl.trimEnd('/') + "/watch"
+                    var watchUrl = guess
+                    var watchDoc: Document? = try {
+                        val d = Jsoup.parse(fetchHtml(guess, movieUrl), guess)
+                        if (d.selectFirst("iframe#videoIframe") != null) d else null
+                    } catch (_: Exception) { null }
+
+                    // إن فشل الرابط المباشر، ارجع للطريقة القديمة (جلب صفحة الفيلم)
+                    if (watchDoc == null) {
+                        val movieHtml = fetchHtml(movieUrl, "$base/")
+                        watchUrl = Jsoup.parse(movieHtml, movieUrl).selectFirst("a.watch__btn")?.absUrl("href") ?: guess
+                        watchDoc = Jsoup.parse(fetchHtml(watchUrl, movieUrl), watchUrl)
+                    }
+
                     val playUrl = watchDoc.selectFirst("iframe#videoIframe")?.absUrl("src")
                     if (playUrl == null) { call.respondText("{\"success\":false,\"error\":\"NO_IFRAME\"}", ContentType.Application.Json); return@get }
                     val altServers = watchDoc.select("#watch li[data-link]").mapNotNull { it.attr("data-link").takeIf { s -> s.isNotBlank() } }
