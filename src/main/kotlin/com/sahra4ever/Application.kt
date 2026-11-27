@@ -215,7 +215,6 @@ private val STREAMHG_EMBED_HOSTS = listOf(
     "strwish.com", "awish.pro", "dwish.pro", "mwish.pro"
 )
 
-// ✅ التعديل 1: StreamHg يجرب المضيف الأصلي أولاً
 private suspend fun resolveStreamHg(fileId: String, originalEmbed: String? = null): Pair<String, String>? {
     val urls = mutableListOf<String>()
     if (originalEmbed != null) urls.add(originalEmbed)
@@ -238,7 +237,6 @@ private suspend fun resolveStreamHg(fileId: String, originalEmbed: String? = nul
     return null
 }
 
-// ✅ التعديل 2: إعادة إضافة MixDrop
 private suspend fun resolveMixDrop(embedUrl: String): Pair<String, String>? {
     return try {
         val page = fetchHtml(embedUrl, embedUrl)
@@ -285,7 +283,6 @@ private suspend fun resolveMegaMax(embedUrl: String): Pair<String, String>? {
     } catch (_: Exception) { null }
 }
 
-// ✅ التعديل 3: EgyDead مع MixDrop + StreamHg الأصلي
 private suspend fun resolveEgyDead(query: String): Map<String, String>? {
     val base = resolveEgyDeadBase()
     val searchHtml = fetchHtml("$base/?s=" + query.trim().replace(" ", "+"), "$base/")
@@ -382,6 +379,37 @@ fun main() {
                     call.respondText("{\"success\":true,\"source\":\"egydead\",\"kind\":\"${r["kind"]}\",\"m3u8\":\"${jsonEscape(r["url"]!!)}\",\"referer\":\"${jsonEscape(r["referer"]!!)}\"}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"success\":false,\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // 🧪 تشخيص مضيف فردي (hgcloud/mixdrop/etc)
+            get("/api/debug-host") {
+                val url = call.request.queryParameters["url"]
+                if (url.isNullOrBlank()) { call.respondText("{\"error\":\"no url\"}", ContentType.Application.Json); return@get }
+                try {
+                    val page = fetchHtml(url, url)
+                    val unpacked = unpackPacker(page) ?: page
+                    val block = Regex("var links=\\{([\\s\\S]*?)\\};").find(unpacked)?.groupValues?.get(1)
+                    fun lv(n: String) = block?.let { Regex("\"$n\":\"([^\"]*)\"").find(it)?.groupValues?.get(1) }
+                    val hls4 = lv("hls4"); val hls2 = lv("hls2"); val hls3 = lv("hls3")
+                    val fileM3u8 = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpacked)?.groupValues?.get(1)
+                    val wurl = Regex("""wurl\s*=\s*["']([^"']+)["']""").find(unpacked)?.groupValues?.get(1)
+                    val anyM3u8 = Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(unpacked)?.groupValues?.get(0)
+                    val json = "{" +
+                        "\"len\":${page.length}," +
+                        "\"hasPacker\":${unpackPacker(page) != null}," +
+                        "\"unpackedLen\":${unpacked.length}," +
+                        "\"hls4\":" + (if (hls4 != null) "\"${jsonEscape(hls4.take(120))}\"" else "null") + "," +
+                        "\"hls2\":" + (if (hls2 != null) "\"${jsonEscape(hls2.take(120))}\"" else "null") + "," +
+                        "\"hls3\":" + (if (hls3 != null) "\"${jsonEscape(hls3.take(120))}\"" else "null") + "," +
+                        "\"fileM3u8\":" + (if (fileM3u8 != null) "\"${jsonEscape(fileM3u8.take(120))}\"" else "null") + "," +
+                        "\"wurl\":" + (if (wurl != null) "\"${jsonEscape(wurl.take(120))}\"" else "null") + "," +
+                        "\"anyM3u8\":" + (if (anyM3u8 != null) "\"${jsonEscape(anyM3u8.take(120))}\"" else "null") + "," +
+                        "\"preview\":\"${jsonEscape(unpacked.take(250))}\"" +
+                        "}"
+                    call.respondText(json, ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
             }
 
