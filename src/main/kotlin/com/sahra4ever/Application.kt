@@ -129,6 +129,9 @@ private suspend fun resolveEgyDeadBase(): String {
     throw IllegalStateException("EGYDEAD_ALL_GATEWAYS_FAILED")
 }
 
+// ⚠️ ملاحظة: حالياً resolveMyCimaBase يأخذ أول بوابة تعمل (200 + حجم > 5000)
+// لاحقاً سنحدّثها لتستخدم نفس منطق عرب سيد: تحليل أغلبية الروابط في الصفحة
+// لاكتشاف النطاق الحقيقي (مثل mycima.house الذي ظهر في RSS)
 private var cachedMyCimaBase: Pair<String, Long>? = null
 private suspend fun resolveMyCimaBase(): String {
     val now = System.currentTimeMillis()
@@ -650,7 +653,6 @@ fun main() {
                 }
             }
 
-            // 🔍 اختبار RSS: عام + بحث عربي + بحث إنجليزي (النسخة الكاملة)
             get("/api/debug-mycima-rss") {
                 val name = call.request.queryParameters["name"] ?: "Spider man"
                 try {
@@ -689,7 +691,6 @@ fun main() {
                 }
             }
 
-            // 🔍 يكشف كيف يبحث الموقع فعلاً (filter/AJAX/permalink)
             get("/api/debug-mycima-filter") {
                 val name = call.request.queryParameters["name"] ?: "Spider man"
                 try {
@@ -716,6 +717,76 @@ fun main() {
                         "\"forms\":[$forms]," +
                         "\"jsCalls\":[$jsCalls]," +
                         "\"sampleAroundFilter\":\"${jsonEscape(sample)}\"" +
+                        "}", ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // 🎬 اختبار صفحة فيلم حقيقية من RSS (يختبر البحث + صفحة الفيلم + السيرفرات)
+            get("/api/debug-mycima-movie") {
+                val name = call.request.queryParameters["name"] ?: "Spider man"
+                try {
+                    val base = resolveMyCimaBase()
+                    val encoded = java.net.URLEncoder.encode(name.trim(), "UTF-8")
+                    val rssUrl = "$base/search/$encoded/feed/"
+                    val rssHtml = fetchHtml(rssUrl, "$base/")
+                    val items = Regex("<item[^>]*>([\\s\\S]*?)</item>").findAll(rssHtml)
+                        .map { m ->
+                            val blk = m.groupValues[1]
+                            val t = Regex("<title>([^<]*)</title>").find(blk)?.groupValues?.get(1)?.trim() ?: ""
+                            val l = Regex("<link>([^<]*)</link>").find(blk)?.groupValues?.get(1)?.trim() ?: ""
+                            t to l
+                        }.toList()
+                    val movie = items.firstOrNull { (t, _) -> t.contains(name, true) } ?: items.firstOrNull()
+                    if (movie == null) { call.respondText("{\"error\":\"NO_MOVIE_IN_RSS\"}", ContentType.Application.Json); return@get }
+
+                    val movieHtml = fetchHtml(movie.second, "$base/")
+                    val mdoc = Jsoup.parse(movieHtml, movie.second)
+
+                    val iframeSrcs = mdoc.select("iframe[src]").map { it.attr("abs:src") }.take(10)
+                    val dataIds = mdoc.select("[data-id]").map { it.attr("data-id") }.take(10)
+                    val dataWatch = mdoc.select("[data-watch]").map { it.attr("data-watch") }.take(10)
+                    val dataSrc = mdoc.select("[data-src]").map { it.attr("data-src") }.take(10)
+                    val links = mdoc.select("a[href]").filter { a ->
+                        val h = a.absUrl("href").lowercase()
+                        h.contains("govid") || h.contains("vidsharing") || h.contains("fsdcmo") ||
+                        h.contains("voe") || h.contains("filemoon") || h.contains("streamhg") ||
+                        h.contains("dood") || h.contains("uqload") || h.contains("/e/") || h.contains("/play/")
+                    }.map { it.absUrl("href") }.take(15)
+
+                    val mohix = Regex("""(?:const|var)\s+Mohix\s*=\s*["']([0-9a-fA-F]+)["']""").find(movieHtml)?.groupValues?.get(1)
+                    val mohixDecoded = if (mohix != null) decodeHexStr(mohix) else null
+
+                    val ajaxTest = if (dataIds.isNotEmpty()) {
+                        try {
+                            val resp = httpClient.post("$base/wp-admin/admin-ajax.php") {
+                                header("Referer", movie.second)
+                                header("X-Requested-With", "XMLHttpRequest")
+                                header("Content-Type", "application/x-www-form-urlencoded")
+                                setBody("action=get_player&server=${dataIds.first()}")
+                            }
+                            val body = resp.bodyAsText()
+                            val iframe = Jsoup.parse(body).selectFirst("iframe")?.attr("src") ?: ""
+                            "{\"code\":${resp.status.value},\"len\":${body.length},\"iframe\":\"${jsonEscape(iframe.take(150))}\"}"
+                        } catch (e: Exception) { "{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}" }
+                    } else "null"
+
+                    call.respondText("{" +
+                        "\"base\":\"${jsonEscape(base)}\"," +
+                        "\"rssUrl\":\"${jsonEscape(rssUrl)}\"," +
+                        "\"items\":[" + items.take(5).joinToString(",") { "(t,l) -> \"${jsonEscape(t.first.take(50))} -> ${jsonEscape(t.second.take(100))}\"" } + "]," +
+                        "\"movieTitle\":\"${jsonEscape(movie.first.take(60))}\"," +
+                        "\"movieUrl\":\"${jsonEscape(movie.second.take(150))}\"," +
+                        "\"movieHtmlLen\":${movieHtml.length}," +
+                        "\"iframeSrcs\":[" + iframeSrcs.joinToString(",") { "\"${jsonEscape(it.take(120))}\"" } + "]," +
+                        "\"dataIds\":[" + dataIds.joinToString(",") { "\"${jsonEscape(it)}\"" } + "]," +
+                        "\"dataWatch\":[" + dataWatch.joinToString(",") { "\"${jsonEscape(it.take(120))}\"" } + "]," +
+                        "\"dataSrc\":[" + dataSrc.joinToString(",") { "\"${jsonEscape(it.take(120))}\"" } + "]," +
+                        "\"links\":[" + links.joinToString(",") { "\"${jsonEscape(it.take(120))}\"" } + "]," +
+                        "\"mohix\":" + (if (mohix != null) "\"${jsonEscape(mohix.take(60))}\"" else "null") + "," +
+                        "\"mohixDecoded\":" + (if (mohixDecoded != null) "\"${jsonEscape(mohixDecoded.take(120))}\"" else "null") + "," +
+                        "\"ajaxTest\":$ajaxTest" +
                         "}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
@@ -828,4 +899,4 @@ fun main() {
             }
         }
     }.start(wait = true)
-                                    }
+}
