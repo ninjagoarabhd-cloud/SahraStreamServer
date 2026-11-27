@@ -27,7 +27,6 @@ private var BASE = ARABSEED_DOMAINS.first()
 
 private val EGYDEAD_GATEWAYS = listOf("https://tv10.egydead.live")
 
-// 🆕 MyCima domain pool (من arprov)
 private val MYCIMA_GATEWAYS = listOf(
     "https://mycima.gdn",
     "https://mycima.agency",
@@ -61,6 +60,14 @@ private fun jsonEscape(s: String): String {
     return sb.toString()
 }
 
+// ✅ الإصلاح 1: فحص Cloudflare حقيقي (يتجنب الإنذارات الكاذبة)
+private fun isRealChallenge(body: String): Boolean {
+    val low = body.lowercase()
+    return low.contains("cf-chl-c") || low.contains("challenge-form") ||
+        low.contains("just a moment") ||
+        (low.contains("checking your browser") && body.length < 20000)
+}
+
 private var cachedFinalBase: Pair<String, Long>? = null
 private val BASE_LOCK = Any()
 
@@ -74,8 +81,7 @@ private suspend fun resolveFinalBase(): String {
     val finalUrl = resp.request.url.toString()
     var host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { BASE }
     val body = resp.bodyAsText()
-    val low = body.lowercase()
-    if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
+    if (isRealChallenge(body)) {
         throw IllegalStateException("CLOUDFLARE on final base $host")
     }
     val doc = Jsoup.parse(body, host)
@@ -103,8 +109,7 @@ private suspend fun resolveEgyDeadBase(): String {
             val finalUrl = resp.request.url.toString()
             var host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { g }
             val body = resp.bodyAsText()
-            val low = body.lowercase()
-            if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) continue
+            if (isRealChallenge(body)) continue
             if (body.length < 500) continue
             val doc = Jsoup.parse(body, host)
             val counts = mutableMapOf<String, Int>()
@@ -124,7 +129,7 @@ private suspend fun resolveEgyDeadBase(): String {
     throw IllegalStateException("EGYDEAD_ALL_GATEWAYS_FAILED")
 }
 
-// 🆕 MyCima: بوابة + كاش (نفس نمط EgyDead)
+// ✅ الإصلاح 2: MyCima محسّن (يرفض 403 + يتحقق من الحجم + يستخدم isRealChallenge)
 private var cachedMyCimaBase: Pair<String, Long>? = null
 private suspend fun resolveMyCimaBase(): String {
     val now = System.currentTimeMillis()
@@ -135,12 +140,11 @@ private suspend fun resolveMyCimaBase(): String {
                 header("User-Agent", UA)
                 header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
             }
-            val finalUrl = resp.request.url.toString()
-            var host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { g }
+            if (resp.status.value != 200) continue
             val body = resp.bodyAsText()
-            val low = body.lowercase()
-            if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) continue
-            if (body.length < 500) continue
+            if (body.length < 5000) continue
+            if (isRealChallenge(body)) continue
+            val host = try { URI(resp.request.url.toString()).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { g }
             cachedMyCimaBase = host to now
             return host
         } catch (_: Exception) {}
@@ -154,8 +158,7 @@ private suspend fun fetchHtml(url: String, referer: String? = null): String {
         try {
             val resp = httpClient.get(url) { if (referer != null) header("Referer", referer) }
             val body = resp.bodyAsText()
-            val low = body.lowercase()
-            if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
+            if (isRealChallenge(body)) {
                 throw IllegalStateException("CLOUDFLARE len=${body.length} @ $url")
             }
             return body
@@ -177,8 +180,7 @@ private suspend fun postHtml(url: String, referer: String? = null): String {
                 setBody("View=1")
             }
             val body = resp.bodyAsText()
-            val low = body.lowercase()
-            if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
+            if (isRealChallenge(body)) {
                 throw IllegalStateException("CLOUDFLARE len=${body.length} @ $url")
             }
             return body
@@ -205,7 +207,6 @@ private fun findMovieLink(doc: Document, query: String, base: String): String? {
 private fun hexToUrl(hex: String): String =
     hex.chunked(2).joinToString("") { it.toInt(16).toChar().toString() }
 
-// ===== فك Packer =====
 private const val PACKER_HEADER = "eval(function(p,a,c,k,e,d){while(c--)if(k[c])p=p.replace(new RegExp('\\\\b'+c.toString(a)+'\\\\b','g'),k[c]);return p}('"
 private const val PACKER_SPLIT_END = "'.split('|'))"
 private fun unpackPacker(html: String): String? {
@@ -220,6 +221,7 @@ private fun unpackPacker(html: String): String? {
     for (i in c - 1 downTo 0) { val ki = k.getOrNull(i) ?: continue; if (ki.isEmpty()) continue; p = p.replace(Regex("\\b" + i.toString(a) + "\\b"), ki) }
     return p
 }
+
 private suspend fun resolveStreamWish(embedUrl: String): Pair<String, String>? = try {
     val page = fetchHtml(embedUrl, embedUrl)
     val unpacked = unpackPacker(page) ?: page
@@ -232,6 +234,7 @@ private suspend fun resolveStreamWish(embedUrl: String): Pair<String, String>? =
         url to embedUrl
     } else null
 } catch (_: Exception) { null }
+
 private suspend fun resolveStreamRuby(embedUrl: String): Pair<String, String>? = try {
     val page = fetchHtml(embedUrl, embedUrl)
     val unpacked = unpackPacker(page) ?: page
@@ -240,7 +243,6 @@ private suspend fun resolveStreamRuby(embedUrl: String): Pair<String, String>? =
     if (m3u8 != null) m3u8 to embedUrl else null
 } catch (_: Exception) { null }
 
-// ===== مضيفات EgyDead =====
 private val STREAMHG_DOMAINS = listOf("https://hanerix.com", "https://vibuxer.com", "https://hgplaycdn.com")
 private val STREAMHG_EMBED_HOSTS = listOf(
     "hanerix.com", "vibuxer.com", "hgplaycdn.com",
@@ -375,7 +377,6 @@ private suspend fun resolveEgyDead(query: String): Map<String, String>? {
     return null
 }
 
-// 🆕 MyCima: دالة decodeHex (نفس hexToUrl لكن للعناوين العامة)
 private fun decodeHexStr(hex: String): String = try {
     val sb = StringBuilder()
     for (i in 0 until hex.length step 2) {
@@ -406,8 +407,7 @@ fun main() {
                 try {
                     val resp = httpClient.get("${EGYDEAD_GATEWAYS.first()}/")
                     val body = resp.bodyAsText()
-                    val low = body.lowercase()
-                    val challenge = low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")
+                    val challenge = isRealChallenge(body)
                     call.respondText("{\"code\":${resp.status.value},\"len\":${body.length},\"challenge\":$challenge}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
@@ -480,10 +480,10 @@ fun main() {
             }
 
             // =====================================================
-            // 🆕 MYCIMA — المرحلة 1: اختبار البنية التحتية
+            // 🆕 MYCIMA — endpoints الاختبار
             // =====================================================
 
-            // 1️⃣ اختبار البوابات الثلاث
+            // ✅ الإصلاح 3: اختبار البوابات مع isRealChallenge
             get("/api/test-mycima") {
                 val results = mutableListOf<String>()
                 for (g in MYCIMA_GATEWAYS) {
@@ -493,8 +493,7 @@ fun main() {
                             header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
                         }
                         val body = resp.bodyAsText()
-                        val low = body.lowercase()
-                        val challenge = low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")
+                        val challenge = isRealChallenge(body)
                         val blocked = body.contains("verifying you are not a bot", true) || body.contains("checking your browser", true)
                         results.add("{\"gateway\":\"$g\",\"code\":${resp.status.value},\"len\":${body.length},\"challenge\":$challenge,\"blocked\":$blocked}")
                     } catch (e: Exception) {
@@ -505,7 +504,6 @@ fun main() {
                 call.respondText("{\"gateways\":[${results.joinToString(",")}],\"resolvedBase\":$resolved}", ContentType.Application.Json)
             }
 
-            // 2️⃣ تشخيص شامل: بحث + صفحة فيلم + استخراج URLs + اختبار AJAX
             get("/api/debug-mycima") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
@@ -515,7 +513,6 @@ fun main() {
                     val searchHtml = fetchHtml(searchUrl, "$base/")
                     val sdoc = Jsoup.parse(searchHtml, base)
 
-                    // نتائج البحث (GridItems)
                     val searchResults = sdoc.select("div#MainFiltar > .GridItem, .GridItem").take(5).mapNotNull { el ->
                         val a = el.selectFirst("a") ?: return@mapNotNull null
                         val title = a.selectFirst("strong")?.text()?.trim() ?: a.attr("title").trim()
@@ -524,7 +521,6 @@ fun main() {
                         "{\"title\":\"${jsonEscape(title)}\",\"href\":\"${jsonEscape(href)}\"}"
                     }
 
-                    // اختيار أول فيلم مطابق
                     val movieUrl = sdoc.select("div#MainFiltar > .GridItem, .GridItem").mapNotNull { el ->
                         val a = el.selectFirst("a") ?: return@mapNotNull null
                         val title = a.selectFirst("strong")?.text()?.trim() ?: a.attr("title").trim()
@@ -533,7 +529,6 @@ fun main() {
                         if (title.contains(name, true) || href.contains(name.replace(" ", "-"), true)) href else null
                     }.firstOrNull()
 
-                    // جلب صفحة الفيلم إن وُجدت
                     var movieInfo: String = "null"
                     var ajaxTest: String = "null"
                     var iframeCount = 0
@@ -551,11 +546,9 @@ fun main() {
                             dataIdCount = mdoc.select("[data-id]").size
                             dataWatchCount = mdoc.select("[data-watch]").size
 
-                            // /e/EMBED_ID/
                             Regex("""/e/(\d+)/?""").findAll(movieHtml).take(3).forEach {
                                 embedUrls.add("$base/e/${it.groupValues[1]}/")
                             }
-                            // /play/BASE64
                             Regex("""/play/([A-Za-z0-9+/=_-]+)""").findAll(movieHtml).take(3).forEach {
                                 val b64 = it.groupValues[1]
                                 try {
@@ -565,13 +558,11 @@ fun main() {
                                     playUrls.add("DECODE_FAILED:$b64")
                                 }
                             }
-                            // Mohix hex
                             mohixFound = Regex("""(?:const|var)\s+Mohix\s*=\s*["']([0-9a-fA-F]+)["']""").find(movieHtml)?.groupValues?.get(1)
 
                             movieInfo = "{\"htmlLen\":${movieHtml.length},\"iframeCount\":$iframeCount,\"dataIdCount\":$dataIdCount,\"dataWatchCount\":$dataWatchCount,\"mohixFound\":" +
                                 (if (mohixFound != null) "\"${jsonEscape(mohixFound!!.take(50))}\"" else "null") + "}"
 
-                            // اختبار AJAX على أول data-id
                             val firstId = mdoc.select("[data-id]").firstOrNull()?.attr("data-id")
                             if (!firstId.isNullOrBlank()) {
                                 try {
@@ -719,4 +710,4 @@ fun main() {
             }
         }
     }.start(wait = true)
-}
+                                    }
