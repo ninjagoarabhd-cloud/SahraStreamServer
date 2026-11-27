@@ -650,15 +650,17 @@ fun main() {
                 }
             }
 
-            // 🔍 اختبار RSS feed على mycima.house (الكنز المكتشف)
+            // 🔍 اختبار RSS: عام + بحث عربي + بحث إنجليزي (النسخة الكاملة)
             get("/api/debug-mycima-rss") {
-                val name = call.request.queryParameters["name"] ?: "Inception"
+                val name = call.request.queryParameters["name"] ?: "Spider man"
                 try {
                     val encoded = java.net.URLEncoder.encode(name.trim(), "UTF-8")
+                    val encodedAr = java.net.URLEncoder.encode("العراب", "UTF-8")
                     val candidates = listOf(
-                        "https://mycima.house/search/$encoded/feed/rss/",
-                        "https://mycima.house/search/$encoded/feed/",
-                        "https://mycima.gdn/search/$encoded/feed/rss/"
+                        "https://mycima.house/feed/",
+                        "https://mycima.gdn/feed/",
+                        "https://mycima.house/search/$encodedAr/feed/",
+                        "https://mycima.house/search/$encoded/feed/"
                     )
                     val results = mutableListOf<String>()
                     for (u in candidates) {
@@ -668,18 +670,53 @@ fun main() {
                             val low = body.lowercase()
                             val isRss = low.contains("<rss") || low.contains("<item") || low.contains("<feed")
                             val itemCount = Regex("<item[ >]").findAll(body).count()
-                            val links = Regex("<link>([^<]+)</link>").findAll(body)
-                                .map { it.groupValues[1].trim() }
-                                .filter { it.contains("http") }
-                                .take(4)
-                                .map { "\"${jsonEscape(it.take(120))}\"" }
+                            val items = Regex("<item[^>]*>([\\s\\S]*?)</item>").findAll(body).take(3)
+                                .map { m ->
+                                    val blk = m.groupValues[1]
+                                    val t = Regex("<title>([^<]*)</title>").find(blk)?.groupValues?.get(1)?.trim() ?: ""
+                                    val l = Regex("<link>([^<]*)</link>").find(blk)?.groupValues?.get(1)?.trim() ?: ""
+                                    "\"${jsonEscape(t.take(45))} -> ${jsonEscape(l.take(110))}\""
+                                }.toList().joinToString(",")
                             val title = Regex("<title>([^<]+)</title>").find(body)?.groupValues?.get(1)?.trim() ?: ""
-                            results.add("{\"url\":\"${jsonEscape(u)}\",\"code\":${resp.status.value},\"len\":${body.length},\"isRss\":$isRss,\"itemCount\":$itemCount,\"title\":\"${jsonEscape(title.take(60))}\",\"links\":[$links]}")
+                            results.add("{\"url\":\"${jsonEscape(u)}\",\"code\":${resp.status.value},\"len\":${body.length},\"isRss\":$isRss,\"itemCount\":$itemCount,\"title\":\"${jsonEscape(title.take(50))}\",\"items\":[$items]}")
                         } catch (e: Exception) {
                             results.add("{\"url\":\"${jsonEscape(u)}\",\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}")
                         }
                     }
                     call.respondText("{\"results\":[$results]}", ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // 🔍 يكشف كيف يبحث الموقع فعلاً (filter/AJAX/permalink)
+            get("/api/debug-mycima-filter") {
+                val name = call.request.queryParameters["name"] ?: "Spider man"
+                try {
+                    val base = resolveMyCimaBase()
+                    val html = fetchHtml("$base/", "$base/")
+                    val actions = Regex("""action["':=\s]+([a-zA-Z0-9_]+)""").findAll(html)
+                        .map { it.groupValues[1] }.distinct().take(15).map { "\"${jsonEscape(it)}\"" }
+                    val filterPaths = Regex("""['"](/[^'"]*(?:filter|search|ajax)[^'"]*)['"]""").findAll(html)
+                        .map { it.groupValues[1] }.distinct().take(15).map { "\"${jsonEscape(it.take(120))}\"" }
+                    val forms = Jsoup.parse(html, base).select("form").take(3).map { f ->
+                        val act = f.attr("action"); val mth = f.attr("method")
+                        val ins = f.select("input").joinToString(",") { "${it.attr("name")}:${it.attr("type")}" }
+                        "\"form action=${jsonEscape(act.take(90))} method=$mth inputs=${jsonEscape(ins.take(120))}\""
+                    }
+                    val jsCalls = Regex("""(?:fetch|\\$\\.ajax|\\$\\.post|XMLHttpRequest)[\\s\\S]{0,120}?(?:['"]([^'"]*(?:filter|search|ajax)[^'"]*)['"])""")
+                        .findAll(html).map { it.groupValues[1] }.distinct().take(8).map { "\"${jsonEscape(it.take(120))}\"" }
+                    val idx = html.lowercase().indexOf("filter")
+                    val sample = if (idx >= 0) html.substring(maxOf(0, idx - 200), minOf(html.length, idx + 200)) else ""
+                    call.respondText("{" +
+                        "\"base\":\"${jsonEscape(base)}\"," +
+                        "\"htmlLen\":${html.length}," +
+                        "\"actions\":[$actions]," +
+                        "\"filterPaths\":[$filterPaths]," +
+                        "\"forms\":[$forms]," +
+                        "\"jsCalls\":[$jsCalls]," +
+                        "\"sampleAroundFilter\":\"${jsonEscape(sample)}\"" +
+                        "}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
