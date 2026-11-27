@@ -60,7 +60,6 @@ private fun jsonEscape(s: String): String {
     return sb.toString()
 }
 
-// ✅ الإصلاح 1: فحص Cloudflare حقيقي (يتجنب الإنذارات الكاذبة)
 private fun isRealChallenge(body: String): Boolean {
     val low = body.lowercase()
     return low.contains("cf-chl-c") || low.contains("challenge-form") ||
@@ -129,7 +128,6 @@ private suspend fun resolveEgyDeadBase(): String {
     throw IllegalStateException("EGYDEAD_ALL_GATEWAYS_FAILED")
 }
 
-// ✅ الإصلاح 2: MyCima محسّن (يرفض 403 + يتحقق من الحجم + يستخدم isRealChallenge)
 private var cachedMyCimaBase: Pair<String, Long>? = null
 private suspend fun resolveMyCimaBase(): String {
     val now = System.currentTimeMillis()
@@ -479,11 +477,6 @@ fun main() {
                 }
             }
 
-            // =====================================================
-            // 🆕 MYCIMA — endpoints الاختبار
-            // =====================================================
-
-            // ✅ الإصلاح 3: اختبار البوابات مع isRealChallenge
             get("/api/test-mycima") {
                 val results = mutableListOf<String>()
                 for (g in MYCIMA_GATEWAYS) {
@@ -597,6 +590,59 @@ fun main() {
                         "\"embedUrls\":[${embedUrls.joinToString(",") { "\"${jsonEscape(it)}\"" }}]," +
                         "\"playUrls\":[${playUrls.joinToString(",") { "\"${jsonEscape(it)}\"" }}]," +
                         "\"ajaxTest\":$ajaxTest" +
+                        "}"
+                    call.respondText(json, ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // 🔍 تشخيص بنية البحث في mycima.gdn
+            get("/api/debug-mycima-search") {
+                val name = call.request.queryParameters["name"] ?: "Inception"
+                try {
+                    val base = resolveMyCimaBase()
+                    val encoded = java.net.URLEncoder.encode(name.trim(), "UTF-8")
+                    val html = fetchHtml("$base/?s=$encoded", "$base/")
+                    val doc = Jsoup.parse(html, base)
+
+                    val counts = mapOf(
+                        "GridItem" to doc.select(".GridItem").size,
+                        "MainFiltar" to doc.select("#MainFiltar").size,
+                        "MovieBlock" to doc.select(".MovieBlock").size,
+                        "postDiv" to doc.select(".postDiv").size,
+                        "entry-box" to doc.select(".entry-box").size,
+                        "article" to doc.select("article").size,
+                        "blockMovie" to doc.select(".blockMovie").size,
+                        "SearchResult" to doc.select(".SearchResult").size,
+                        "item" to doc.select(".item").size,
+                        "card" to doc.select(".card").size,
+                        "post" to doc.select(".post").size,
+                        "row" to doc.select(".row").size,
+                        "col" to doc.select(".col").size,
+                        "all_a" to doc.select("a[href]").size
+                    )
+
+                    val anchors = doc.select("a[href]").filter { a ->
+                        val t = a.text().trim(); val ti = a.attr("title").trim()
+                        (t.isNotBlank() || ti.isNotBlank()) && !a.absUrl("href").isBlank()
+                    }.take(35).map { a ->
+                        val t = a.text().trim().ifBlank { a.attr("title").trim() }
+                        "\"${jsonEscape(a.absUrl("href").take(90))} | ${jsonEscape(t.take(40))}\""
+                    }
+
+                    val idx = html.lowercase().indexOf(name.lowercase())
+                    val sample = if (idx >= 0)
+                        html.substring(maxOf(0, idx - 250), minOf(html.length, idx + 250))
+                    else ""
+
+                    val json = "{" +
+                        "\"base\":\"${jsonEscape(base)}\"," +
+                        "\"htmlLen\":${html.length}," +
+                        "\"containsQuery\":${html.lowercase().contains(name.lowercase())}," +
+                        "\"counts\":{" + counts.entries.joinToString(",") { "\"${it.key}\":${it.value}" } + "}," +
+                        "\"anchors\":[" + anchors.joinToString(",") + "]," +
+                        "\"sampleAroundQuery\":\"${jsonEscape(sample)}\"" +
                         "}"
                     call.respondText(json, ContentType.Application.Json)
                 } catch (e: Exception) {
