@@ -23,7 +23,7 @@ private const val UA =
 private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
 private var BASE = ARABSEED_DOMAINS.first()
 
-private val AKWAM_GATEWAYS = listOf("https://akwams.org", "https://akwam.ss")
+private val EGYDEAD_GATEWAYS = listOf("https://tv10.egydead.live")
 
 private val httpClient = HttpClient(OkHttp) {
     engine {
@@ -84,11 +84,11 @@ private suspend fun resolveFinalBase(): String {
     return host
 }
 
-private var cachedAkwamBase: Pair<String, Long>? = null
-private suspend fun resolveAkwamBase(): String {
+private var cachedEgyDeadBase: Pair<String, Long>? = null
+private suspend fun resolveEgyDeadBase(): String {
     val now = System.currentTimeMillis()
-    cachedAkwamBase?.let { (b, ts) -> if (now - ts < 600_000) return b }
-    for (g in AKWAM_GATEWAYS) {
+    cachedEgyDeadBase?.let { (b, ts) -> if (now - ts < 600_000) return b }
+    for (g in EGYDEAD_GATEWAYS) {
         try {
             val resp = httpClient.get("$g/")
             val finalUrl = resp.request.url.toString()
@@ -108,11 +108,11 @@ private suspend fun resolveAkwamBase(): String {
             }
             val top = counts.maxByOrNull { it.value }?.key
             if (top != null && top != host && (counts[top] ?: 0) >= 5) host = top
-            cachedAkwamBase = host to now
+            cachedEgyDeadBase = host to now
             return host
         } catch (_: Exception) {}
     }
-    throw IllegalStateException("AKWAM_ALL_GATEWAYS_FAILED")
+    throw IllegalStateException("EGYDEAD_ALL_GATEWAYS_FAILED")
 }
 
 private suspend fun fetchHtml(url: String, referer: String? = null): String {
@@ -184,61 +184,62 @@ private suspend fun resolveStreamRuby(embedUrl: String): Pair<String, String>? =
     if (m3u8 != null) m3u8 to embedUrl else null
 } catch (_: Exception) { null }
 
-// ✅ جديد: DoodStream
-private suspend fun resolveDood(embedUrl: String): Pair<String, String>? {
-    return try {
-        val page = fetchHtml(embedUrl, embedUrl)
-        val pass = Regex("/pass_md5/[^'\"\\s]+").find(page)?.value ?: return null
-        val token = Regex("[?&]token=([a-zA-Z0-9]+)").find(page)?.groupValues?.get(1)
-            ?: Regex("token\\s*[:=]\\s*['\"]([a-zA-Z0-9]+)").find(page)?.groupValues?.get(1) ?: return null
-        val host = URI(embedUrl).let { "${it.scheme}://${it.host}" }
-        val md5 = fetchHtml("$host$pass", embedUrl).trim()
-        val rand = (1..10).map { "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".random() }.joinToString("")
-        val sep = if (md5.endsWith("?")) "&" else "?"
-        (md5 + rand + sep + "token=$token&expiry=${System.currentTimeMillis()}") to host
-    } catch (_: Exception) { null }
-}
-// ✅ جديد: MixDrop
-private suspend fun resolveMixDrop(embedUrl: String): Pair<String, String>? {
-    return try {
-        val page = fetchHtml(embedUrl, embedUrl)
-        val unpacked = unpackPacker(page) ?: page
-        val wurl = Regex("""wurl\s*=\s*["']([^"']+)["']""").find(unpacked)?.groupValues?.get(1) ?: return null
-        val url = if (wurl.startsWith("//")) "https:$wurl" else wurl
-        url to embedUrl
-    } catch (_: Exception) { null }
-}
-
-// ===== استخراج أكوام =====
-private suspend fun resolveAkwam(query: String): Map<String, String>? {
-    val base = resolveAkwamBase()
-    val searchHtml = fetchHtml("$base/search?q=" + query.trim().replace(" ", "+"), "$base/")
-    val doc = Jsoup.parse(searchHtml, base)
-    // ✅ إصلاح: لا نسقط لأول صندوق (تجنب فيلم خاطئ) — لا تطابق = null
-    val box = doc.select("div.entry-box").firstOrNull { el ->
-        val href = el.selectFirst("a.box, a")?.absUrl("href") ?: return@firstOrNull false
-        !href.contains("/games/") && !href.contains("/programs/") &&
-            (el.selectFirst("picture > img, img")?.attr("alt") ?: el.selectFirst("h3, .entry-title")?.text() ?: "").contains(query, true)
+// ===== مضيفات EgyDead (غير مقفلة IP) =====
+private val STREAMHG_DOMAINS = listOf("https://hanerix.com", "https://vibuxer.com", "https://hgplaycdn.com")
+private suspend fun resolveStreamHg(fileId: String): Pair<String, String>? {
+    for (d in STREAMHG_DOMAINS) {
+        try {
+            val embed = "$d/e/$fileId"
+            val page = fetchHtml(embed, embed)
+            val unpacked = unpackPacker(page) ?: page
+            val block = Regex("var links=\\{([\\s\\S]*?)\\};").find(unpacked)?.groupValues?.get(1)
+            fun lv(n: String) = block?.let { Regex("\"$n\":\"([^\"]*)\"").find(it)?.groupValues?.get(1) }
+            val raw = lv("hls4") ?: lv("hls2") ?: lv("hls3")
+                ?: Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpacked)?.groupValues?.get(1)
+            if (raw != null) {
+                val url = if (raw.startsWith("http")) raw else "$d$raw"
+                return url to embed
+            }
+        } catch (_: Exception) {}
     }
-    val movieUrl = box?.selectFirst("a.box, a")?.absUrl("href") ?: return null
-    val baseUrl = movieUrl.trimEnd('/')
+    return null
+}
+private suspend fun resolveMegaMax(embedUrl: String): Pair<String, String>? = try {
+    val page = fetchHtml(embedUrl, embedUrl)
+    val u = unpackPacker(page) ?: page
+    val m = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(u)?.groupValues?.get(1)
+        ?: Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(u)?.groupValues?.get(0)
+    if (m != null) m to embedUrl else null
+} catch (_: Exception) { null }
+
+// ===== استخراج EgyDead =====
+private suspend fun resolveEgyDead(query: String): Map<String, String>? {
+    val base = resolveEgyDeadBase()
+    val searchHtml = fetchHtml("$base/?s=" + query.trim().replace(" ", "+"), "$base/")
+    val movieUrl = findMovieLink(Jsoup.parse(searchHtml, base), query, base) ?: return null
     val cand = mutableListOf<String>()
-    try { Jsoup.parse(fetchHtml("$baseUrl/watch", baseUrl), "$baseUrl/watch").select("iframe[src]").forEach { val s = it.absUrl("src"); if (s.startsWith("http") && !s.contains("ads") && !s.contains("facebook")) cand.add(s) } } catch (_: Exception) {}
-    try {
-        val mirror = Regex("(?i)(mixdrop|dood|streamruby|send\\.cm|uqload|streamwish|byseraguci|vidhide|voe|hgcloud|mp4upload|vidmoly)")
-        Jsoup.parse(fetchHtml("$baseUrl/download", baseUrl), "$baseUrl/download").select("a[href]").forEach { val h = it.absUrl("href"); if (h.startsWith("http") && mirror.containsMatchIn(h)) cand.add(h) }
-    } catch (_: Exception) {}
+    fun collect(doc: Document) {
+        doc.select("li[data-link], li[data-src], li[data-url]").forEach {
+            val s = it.attr("data-link").ifBlank { it.attr("data-src") }.ifBlank { it.attr("data-url") }
+            if (s.startsWith("http")) cand.add(s)
+        }
+        doc.select("iframe[src]").forEach { val s = it.absUrl("src"); if (s.startsWith("http") && !s.contains("ads")) cand.add(s) }
+    }
+    try { collect(Jsoup.parse(fetchHtml(movieUrl, "$base/"), movieUrl)) } catch (_: Exception) {}
+    try { val w = movieUrl.trimEnd('/') + "/watch"; collect(Jsoup.parse(fetchHtml(w, movieUrl), w)) } catch (_: Exception) {}
     for (c in cand.distinct()) {
         val host = try { URI(c).host?.removePrefix("www.") ?: "" } catch (_: Exception) { "" }
         val r = when {
-            host.contains("dood") -> resolveDood(c)
-            host.contains("mixdrop") -> resolveMixDrop(c)
-            host.contains("streamwish") || host.contains("hgcloud") || host.contains("hglink") || host.contains("hanerix") || host.contains("vibuxer") || host.contains("hgplaycdn") || host.contains("strwish") || host.contains("awish") || host.contains("dwish") || host.contains("mwish") -> resolveStreamWish(c)
+            host.contains("megamax") -> resolveMegaMax(c)
             host.contains("streamruby") || host.contains("stmruby") -> resolveStreamRuby(c)
+            host.contains("hanerix") || host.contains("vibuxer") || host.contains("hgplaycdn") || host.contains("hglink") || host.contains("hgcloud") || host.contains("streamwish") || host.contains("strwish") || host.contains("awish") || host.contains("dwish") || host.contains("mwish") -> {
+                val fid = Regex("/(?:e|embed|file)/([A-Za-z0-9]+)").find(c)?.groupValues?.get(1)
+                if (fid != null) resolveStreamHg(fid) else resolveStreamWish(c)
+            }
             else -> null
         }
         if (r != null) return mapOf(
-            "source" to "akwam",
+            "source" to "egydead",
             "kind" to (if (r.first.contains(".m3u8")) "m3u8" else "video"),
             "url" to r.first,
             "referer" to r.second
@@ -264,76 +265,43 @@ fun main() {
                 }
             }
 
-            get("/api/test-akwam") {
-                val results = mutableListOf<String>()
-                for (g in AKWAM_GATEWAYS) {
-                    try {
-                        val resp = httpClient.get("$g/")
-                        val body = resp.bodyAsText()
-                        val low = body.lowercase()
-                        val challenge = low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")
-                        results.add("{\"gateway\":\"$g\",\"code\":${resp.status.value},\"len\":${body.length},\"challenge\":$challenge}")
-                    } catch (e: Exception) {
-                        results.add("{\"gateway\":\"$g\",\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}")
-                    }
+            get("/api/test-egydead") {
+                try {
+                    val resp = httpClient.get("${EGYDEAD_GATEWAYS.first()}/")
+                    val body = resp.bodyAsText()
+                    val low = body.lowercase()
+                    val challenge = low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")
+                    call.respondText("{\"code\":${resp.status.value},\"len\":${body.length},\"challenge\":$challenge}", ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
-                val resolved = try { "\"${resolveAkwamBase()}\"" } catch (e: Exception) { "null" }
-                call.respondText("{\"gateways\":[${results.joinToString(",")}],\"resolvedBase\":$resolved}", ContentType.Application.Json)
             }
 
-            get("/api/akwam") {
+            get("/api/egydead") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
-                    val r = resolveAkwam(name)
-                    if (r == null) { call.respondText("{\"success\":false,\"error\":\"AKWAM_NO_LINK\"}", ContentType.Application.Json); return@get }
-                    call.respondText("{\"success\":true,\"source\":\"akwam\",\"kind\":\"${r["kind"]}\",\"m3u8\":\"${jsonEscape(r["url"]!!)}\",\"referer\":\"${jsonEscape(r["referer"]!!)}\"}", ContentType.Application.Json)
+                    val r = resolveEgyDead(name)
+                    if (r == null) { call.respondText("{\"success\":false,\"error\":\"EGYDEAD_NO_LINK\"}", ContentType.Application.Json); return@get }
+                    call.respondText("{\"success\":true,\"source\":\"egydead\",\"kind\":\"${r["kind"]}\",\"m3u8\":\"${jsonEscape(r["url"]!!)}\",\"referer\":\"${jsonEscape(r["referer"]!!)}\"}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"success\":false,\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
             }
 
-            get("/api/debug-akwam") {
+            get("/api/debug-egydead") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
-                    val base = resolveAkwamBase()
-                    val searchUrl = "$base/search?q=" + name.trim().replace(" ", "+")
-                    val html = fetchHtml(searchUrl, "$base/")
+                    val base = resolveEgyDeadBase()
+                    val html = fetchHtml("$base/?s=" + name.trim().replace(" ", "+"), "$base/")
                     val doc = Jsoup.parse(html, base)
-                    val boxes = doc.select("div.entry-box")
-                    val boxInfo = boxes.take(5).map { el ->
-                        val t = el.selectFirst("picture > img, img")?.attr("alt") ?: el.selectFirst("h3, .entry-title")?.text() ?: ""
-                        val h = el.selectFirst("a.box, a")?.absUrl("href") ?: ""
-                        "{\"title\":\"${jsonEscape(t)}\",\"href\":\"${jsonEscape(h)}\"}"
-                    }
-                    val box = boxes.firstOrNull { el ->
-                        val href = el.selectFirst("a.box, a")?.absUrl("href") ?: return@firstOrNull false
-                        !href.contains("/games/") && !href.contains("/programs/") &&
-                            (el.selectFirst("picture > img, img")?.attr("alt") ?: el.selectFirst("h3, .entry-title")?.text() ?: "").contains(name, true)
-                    } ?: boxes.firstOrNull { el ->
-                        val h = el.selectFirst("a.box, a")?.absUrl("href") ?: ""; h.isNotEmpty() && !h.contains("/games/") && !h.contains("/programs/")
-                    }
-                    val movieUrl = box?.selectFirst("a.box, a")?.absUrl("href")
-                    val watchIframes = mutableListOf<String>()
-                    val mirrors = mutableListOf<String>()
+                    val links = doc.select("a[href]").take(30).map { a -> "\"${jsonEscape(a.absUrl("href") + " | " + a.text().take(60))}\"" }
+                    val movieUrl = findMovieLink(doc, name, base)
+                    val servers = mutableListOf<String>()
                     if (movieUrl != null) {
-                        val b = movieUrl.trimEnd('/')
-                        try { Jsoup.parse(fetchHtml("$b/watch", b), "$b/watch").select("iframe[src]").forEach { watchIframes.add(it.absUrl("src")) } } catch (_: Exception) {}
-                        try {
-                            val mr = Regex("(?i)(mixdrop|dood|streamruby|send\\.cm|uqload|streamwish|byseraguci|vidhide|voe|hgcloud|mp4upload|vidmoly)")
-                            Jsoup.parse(fetchHtml("$b/download", b), "$b/download").select("a[href]").forEach { val h = it.absUrl("href"); if (mr.containsMatchIn(h)) mirrors.add(h) }
-                        } catch (_: Exception) {}
+                        try { Jsoup.parse(fetchHtml(movieUrl, "$base/"), movieUrl).select("li[data-link], li[data-src], iframe[src]").forEach { servers.add(it.attr("data-link").ifBlank { it.attr("data-src") }.ifBlank { it.absUrl("src") }) } } catch (_: Exception) {}
+                        try { val w = movieUrl.trimEnd('/') + "/watch"; Jsoup.parse(fetchHtml(w, movieUrl), w).select("li[data-link], li[data-src], iframe[src]").forEach { servers.add(it.attr("data-link").ifBlank { it.attr("data-src") }.ifBlank { it.absUrl("src") }) } } catch (_: Exception) {}
                     }
-                    val json = "{" +
-                        "\"base\":\"${jsonEscape(base)}\"," +
-                        "\"htmlLen\":${html.length}," +
-                        "\"containsQuery\":${html.lowercase().contains(name.lowercase())}," +
-                        "\"boxCount\":${boxes.size}," +
-                        "\"boxes\":[${boxInfo.joinToString(",")}]," +
-                        "\"movieUrl\":" + (if (movieUrl != null) "\"${jsonEscape(movieUrl)}\"" else "null") + "," +
-                        "\"watchIframes\":[${watchIframes.joinToString(",") { "\"${jsonEscape(it)}\"" }}]," +
-                        "\"downloadMirrors\":[${mirrors.joinToString(",") { "\"${jsonEscape(it)}\"" }}]" +
-                        "}"
-                    call.respondText(json, ContentType.Application.Json)
+                    call.respondText("{\"base\":\"${jsonEscape(base)}\",\"containsQuery\":${html.lowercase().contains(name.lowercase())},\"movieUrl\":" + (if (movieUrl != null) "\"${jsonEscape(movieUrl)}\"" else "null") + ",\"links\":[${links.joinToString(",")}],\"servers\":[${servers.joinToString(",") { "\"${jsonEscape(it)}\"" }}]}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
