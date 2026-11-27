@@ -134,6 +134,30 @@ private suspend fun fetchHtml(url: String, referer: String? = null): String {
     throw last ?: IllegalStateException("fetch failed @ $url")
 }
 
+// ✅ طلب POST لإظهار قائمة السيرفرات في EgyDead (View=1)
+private suspend fun postHtml(url: String, referer: String? = null): String {
+    var last: Exception? = null
+    for (i in 0 until 3) {
+        try {
+            val resp = httpClient.post(url) {
+                if (referer != null) header("Referer", referer)
+                header("Content-Type", "application/x-www-form-urlencoded")
+                setBody("View=1")
+            }
+            val body = resp.bodyAsText()
+            val low = body.lowercase()
+            if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
+                throw IllegalStateException("CLOUDFLARE len=${body.length} @ $url")
+            }
+            return body
+        } catch (e: Exception) {
+            last = e
+            kotlinx.coroutines.delay(700L * (i + 1))
+        }
+    }
+    throw last ?: IllegalStateException("post failed @ $url")
+}
+
 private fun findMovieLink(doc: Document, query: String, base: String): String? {
     val byText = doc.select("a[href]").firstOrNull { a ->
         val href = a.absUrl("href"); val txt = a.text()
@@ -186,6 +210,12 @@ private suspend fun resolveStreamRuby(embedUrl: String): Pair<String, String>? =
 
 // ===== مضيفات EgyDead (غير مقفلة IP) =====
 private val STREAMHG_DOMAINS = listOf("https://hanerix.com", "https://vibuxer.com", "https://hgplaycdn.com")
+private val STREAMHG_EMBED_HOSTS = listOf(
+    "hanerix.com", "vibuxer.com", "hgplaycdn.com",
+    "hgcloud.to", "hglink.to", "streamwish.to", "streamwish.com", "streamwish.net",
+    "strwish.com", "awish.pro", "dwish.pro", "mwish.pro"
+)
+
 private suspend fun resolveStreamHg(fileId: String): Pair<String, String>? {
     for (d in STREAMHG_DOMAINS) {
         try {
@@ -204,37 +234,93 @@ private suspend fun resolveStreamHg(fileId: String): Pair<String, String>? {
     }
     return null
 }
-private suspend fun resolveMegaMax(embedUrl: String): Pair<String, String>? = try {
-    val page = fetchHtml(embedUrl, embedUrl)
-    val u = unpackPacker(page) ?: page
-    val m = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(u)?.groupValues?.get(1)
-        ?: Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(u)?.groupValues?.get(0)
-    if (m != null) m to embedUrl else null
-} catch (_: Exception) { null }
 
-// ===== استخراج EgyDead =====
+// ✅ MegaMax مع دعم Inertia (X-Inertia-Version/Component/Partial-Data)
+private suspend fun resolveMegaMax(embedUrl: String): Pair<String, String>? {
+    val pageUrl = embedUrl.replace("/download/", "/iframe/")
+    return try {
+        val html = fetchHtml(pageUrl, EGYDEAD_GATEWAYS.first())
+        val version = Regex(""""version"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1)
+        val rawComp = Regex(""""component"\s*:\s*"([^"]+)"""").find(html)?.groupValues?.get(1) ?: "files/mirror/video"
+        val component = rawComp.replace("\\/", "/")
+        val jsonText = if (!version.isNullOrEmpty()) {
+            httpClient.get(pageUrl) {
+                header("Referer", pageUrl)
+                header("X-Requested-With", "XMLHttpRequest")
+                header("X-Inertia", "true")
+                header("X-Inertia-Version", version)
+                header("X-Inertia-Partial-Component", component)
+                header("X-Inertia-Partial-Data", "streams")
+            }.bodyAsText()
+        } else html
+        val links = Regex(""""link"\s*:\s*"([^"]+)"""").findAll(jsonText)
+            .map { it.groupValues[1].replace("\\/", "/") }.toList()
+        for (raw in links) {
+            val link = if (raw.startsWith("//")) "https:$raw" else raw
+            val host = try { URI(link).host?.removePrefix("www.") ?: "" } catch (_: Exception) { "" }
+            val r = when {
+                host.contains("streamruby") || host.contains("stmruby") -> resolveStreamRuby(link)
+                STREAMHG_EMBED_HOSTS.any { host.endsWith(it) } || link.contains("streamwish") -> {
+                    val fid = link.substringAfterLast('/').substringBefore('?')
+                    if (fid.isNotEmpty()) resolveStreamHg(fid) else null
+                }
+                else -> null
+            }
+            if (r != null) return r
+        }
+        null
+    } catch (_: Exception) { null }
+}
+
+// ✅ EgyDead: POST View=1 + سيليكترات السيرفرات الصحيحة
 private suspend fun resolveEgyDead(query: String): Map<String, String>? {
     val base = resolveEgyDeadBase()
     val searchHtml = fetchHtml("$base/?s=" + query.trim().replace(" ", "+"), "$base/")
-    val movieUrl = findMovieLink(Jsoup.parse(searchHtml, base), query, base) ?: return null
-    val cand = mutableListOf<String>()
-    fun collect(doc: Document) {
-        doc.select("li[data-link], li[data-src], li[data-url]").forEach {
-            val s = it.attr("data-link").ifBlank { it.attr("data-src") }.ifBlank { it.attr("data-url") }
-            if (s.startsWith("http")) cand.add(s)
-        }
-        doc.select("iframe[src]").forEach { val s = it.absUrl("src"); if (s.startsWith("http") && !s.contains("ads")) cand.add(s) }
+    val sdoc = Jsoup.parse(searchHtml, base)
+
+    // مطابقة البحث: ابحث عن box بعنوان يطابق الاستعلام
+    val movieUrl = sdoc.select("li.movieItem, div.BlockItem").mapNotNull { el ->
+        val a = if (el.tagName() == "a") el else el.selectFirst("a") ?: return@mapNotNull null
+        val href = a.absUrl("href")
+        val title = a.selectFirst("h1, h2, h3, .BottomTitle")?.text() ?: a.attr("title")
+        if (href.isEmpty() || href.contains("/category/") || href.contains("/page/") || href.contains("/tag/")) return@mapNotNull null
+        if (title.contains(query, true) || href.contains(query.replace(" ", "-"), true)) href else null
+    }.firstOrNull() ?: findMovieLink(sdoc, query, base) ?: return null
+
+    // ✅ POST View=1 لإظهار قائمة السيرفرات (السر الأساسي)
+    val doc = try {
+        val d = Jsoup.parse(postHtml(movieUrl, "$base/"), movieUrl)
+        if (d.selectFirst("ul.serversList, div.ServersList, .donwload-servers-list, [data-link]") != null) d
+        else Jsoup.parse(fetchHtml(movieUrl, "$base/"), movieUrl)
+    } catch (_: Exception) {
+        Jsoup.parse(fetchHtml(movieUrl, "$base/"), movieUrl)
     }
-    try { collect(Jsoup.parse(fetchHtml(movieUrl, "$base/"), movieUrl)) } catch (_: Exception) {}
-    try { val w = movieUrl.trimEnd('/') + "/watch"; collect(Jsoup.parse(fetchHtml(w, movieUrl), w)) } catch (_: Exception) {}
+
+    val cand = mutableListOf<String>()
+    // سيليكترات السيرفرات الصحيحة (من arprov EgyDeadProvider)
+    doc.select("ul.serversList [data-link], div.ServersList [data-link], ul.serversList > li, div.ServersList li").forEach { el ->
+        val u = el.attr("data-link").trim().ifEmpty { el.attr("href").trim() }
+        if (u.isNotEmpty() && !u.startsWith("javascript")) cand.add(u)
+    }
+    doc.select(".donwload-servers-list > li a, ul.download a").forEach { el ->
+        val u = el.attr("href").trim()
+        if (u.isNotEmpty() && !u.startsWith("javascript") && !u.contains("egydead")) cand.add(u)
+    }
+    doc.select("iframe").forEach { ifr ->
+        val s = ifr.attr("src").trim()
+        if (s.isNotEmpty() && !s.contains("youtube") && !s.contains("google") && !s.contains("egydead") && !s.startsWith("javascript")) cand.add(s)
+    }
+
     for (c in cand.distinct()) {
-        val host = try { URI(c).host?.removePrefix("www.") ?: "" } catch (_: Exception) { "" }
+        val link = if (c.startsWith("//")) "https:$c" else c
+        val host = try { URI(link).host?.removePrefix("www.") ?: "" } catch (_: Exception) { "" }
+        val lower = link.lowercase()
         val r = when {
-            host.contains("megamax") -> resolveMegaMax(c)
-            host.contains("streamruby") || host.contains("stmruby") -> resolveStreamRuby(c)
-            host.contains("hanerix") || host.contains("vibuxer") || host.contains("hgplaycdn") || host.contains("hglink") || host.contains("hgcloud") || host.contains("streamwish") || host.contains("strwish") || host.contains("awish") || host.contains("dwish") || host.contains("mwish") -> {
-                val fid = Regex("/(?:e|embed|file)/([A-Za-z0-9]+)").find(c)?.groupValues?.get(1)
-                if (fid != null) resolveStreamHg(fid) else resolveStreamWish(c)
+            lower.contains("/iframe/") || lower.contains("/download/") || lower.contains("megamax") -> resolveMegaMax(link)
+            host.contains("streamruby") || host.contains("stmruby") -> resolveStreamRuby(link)
+            STREAMHG_EMBED_HOSTS.any { host.endsWith(it) } || link.contains("streamwish") -> {
+                val fid = link.substringAfterLast('/').substringBefore('?')
+                if (fid.isNotEmpty()) resolveStreamHg(fid) else null
             }
             else -> null
         }
@@ -298,8 +384,15 @@ fun main() {
                     val movieUrl = findMovieLink(doc, name, base)
                     val servers = mutableListOf<String>()
                     if (movieUrl != null) {
+                        // GET
                         try { Jsoup.parse(fetchHtml(movieUrl, "$base/"), movieUrl).select("li[data-link], li[data-src], iframe[src]").forEach { servers.add(it.attr("data-link").ifBlank { it.attr("data-src") }.ifBlank { it.absUrl("src") }) } } catch (_: Exception) {}
-                        try { val w = movieUrl.trimEnd('/') + "/watch"; Jsoup.parse(fetchHtml(w, movieUrl), w).select("li[data-link], li[data-src], iframe[src]").forEach { servers.add(it.attr("data-link").ifBlank { it.attr("data-src") }.ifBlank { it.absUrl("src") }) } } catch (_: Exception) {}
+                        // ✅ POST View=1
+                        try {
+                            val d = Jsoup.parse(postHtml(movieUrl, "$base/"), movieUrl)
+                            d.select("ul.serversList [data-link], div.ServersList [data-link], .donwload-servers-list a, iframe[src]").forEach {
+                                servers.add(it.attr("data-link").ifBlank { it.attr("href").ifBlank { it.absUrl("src") } })
+                            }
+                        } catch (_: Exception) {}
                     }
                     call.respondText("{\"base\":\"${jsonEscape(base)}\",\"containsQuery\":${html.lowercase().contains(name.lowercase())},\"movieUrl\":" + (if (movieUrl != null) "\"${jsonEscape(movieUrl)}\"" else "null") + ",\"links\":[${links.joinToString(",")}],\"servers\":[${servers.joinToString(",") { "\"${jsonEscape(it)}\"" }}]}", ContentType.Application.Json)
                 } catch (e: Exception) {
