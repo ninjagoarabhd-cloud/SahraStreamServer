@@ -134,7 +134,6 @@ private suspend fun fetchHtml(url: String, referer: String? = null): String {
     throw last ?: IllegalStateException("fetch failed @ $url")
 }
 
-// ✅ طلب POST لإظهار قائمة السيرفرات في EgyDead (View=1)
 private suspend fun postHtml(url: String, referer: String? = null): String {
     var last: Exception? = null
     for (i in 0 until 3) {
@@ -208,7 +207,7 @@ private suspend fun resolveStreamRuby(embedUrl: String): Pair<String, String>? =
     if (m3u8 != null) m3u8 to embedUrl else null
 } catch (_: Exception) { null }
 
-// ===== مضيفات EgyDead (غير مقفلة IP) =====
+// ===== مضيفات EgyDead =====
 private val STREAMHG_DOMAINS = listOf("https://hanerix.com", "https://vibuxer.com", "https://hgplaycdn.com")
 private val STREAMHG_EMBED_HOSTS = listOf(
     "hanerix.com", "vibuxer.com", "hgplaycdn.com",
@@ -216,26 +215,40 @@ private val STREAMHG_EMBED_HOSTS = listOf(
     "strwish.com", "awish.pro", "dwish.pro", "mwish.pro"
 )
 
-private suspend fun resolveStreamHg(fileId: String): Pair<String, String>? {
-    for (d in STREAMHG_DOMAINS) {
+// ✅ التعديل 1: StreamHg يجرب المضيف الأصلي أولاً
+private suspend fun resolveStreamHg(fileId: String, originalEmbed: String? = null): Pair<String, String>? {
+    val urls = mutableListOf<String>()
+    if (originalEmbed != null) urls.add(originalEmbed)
+    STREAMHG_DOMAINS.forEach { urls.add("$it/e/$fileId") }
+    for (u in urls) {
         try {
-            val embed = "$d/e/$fileId"
-            val page = fetchHtml(embed, embed)
+            val page = fetchHtml(u, u)
             val unpacked = unpackPacker(page) ?: page
             val block = Regex("var links=\\{([\\s\\S]*?)\\};").find(unpacked)?.groupValues?.get(1)
             fun lv(n: String) = block?.let { Regex("\"$n\":\"([^\"]*)\"").find(it)?.groupValues?.get(1) }
             val raw = lv("hls4") ?: lv("hls2") ?: lv("hls3")
                 ?: Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpacked)?.groupValues?.get(1)
             if (raw != null) {
-                val url = if (raw.startsWith("http")) raw else "$d$raw"
-                return url to embed
+                val host = URI(u).let { "${it.scheme}://${it.host}" }
+                val url = if (raw.startsWith("http")) raw else "$host$raw"
+                return url to u
             }
         } catch (_: Exception) {}
     }
     return null
 }
 
-// ✅ MegaMax مع دعم Inertia (X-Inertia-Version/Component/Partial-Data)
+// ✅ التعديل 2: إعادة إضافة MixDrop
+private suspend fun resolveMixDrop(embedUrl: String): Pair<String, String>? {
+    return try {
+        val page = fetchHtml(embedUrl, embedUrl)
+        val unpacked = unpackPacker(page) ?: page
+        val wurl = Regex("""wurl\s*=\s*["']([^"']+)["']""").find(unpacked)?.groupValues?.get(1) ?: return null
+        val url = if (wurl.startsWith("//")) "https:$wurl" else wurl
+        url to embedUrl
+    } catch (_: Exception) { null }
+}
+
 private suspend fun resolveMegaMax(embedUrl: String): Pair<String, String>? {
     val pageUrl = embedUrl.replace("/download/", "/iframe/")
     return try {
@@ -262,7 +275,7 @@ private suspend fun resolveMegaMax(embedUrl: String): Pair<String, String>? {
                 host.contains("streamruby") || host.contains("stmruby") -> resolveStreamRuby(link)
                 STREAMHG_EMBED_HOSTS.any { host.endsWith(it) } || link.contains("streamwish") -> {
                     val fid = link.substringAfterLast('/').substringBefore('?')
-                    if (fid.isNotEmpty()) resolveStreamHg(fid) else null
+                    if (fid.isNotEmpty()) resolveStreamHg(fid, link) else null
                 }
                 else -> null
             }
@@ -272,13 +285,12 @@ private suspend fun resolveMegaMax(embedUrl: String): Pair<String, String>? {
     } catch (_: Exception) { null }
 }
 
-// ✅ EgyDead: POST View=1 + سيليكترات السيرفرات الصحيحة
+// ✅ التعديل 3: EgyDead مع MixDrop + StreamHg الأصلي
 private suspend fun resolveEgyDead(query: String): Map<String, String>? {
     val base = resolveEgyDeadBase()
     val searchHtml = fetchHtml("$base/?s=" + query.trim().replace(" ", "+"), "$base/")
     val sdoc = Jsoup.parse(searchHtml, base)
 
-    // مطابقة البحث: ابحث عن box بعنوان يطابق الاستعلام
     val movieUrl = sdoc.select("li.movieItem, div.BlockItem").mapNotNull { el ->
         val a = if (el.tagName() == "a") el else el.selectFirst("a") ?: return@mapNotNull null
         val href = a.absUrl("href")
@@ -287,7 +299,6 @@ private suspend fun resolveEgyDead(query: String): Map<String, String>? {
         if (title.contains(query, true) || href.contains(query.replace(" ", "-"), true)) href else null
     }.firstOrNull() ?: findMovieLink(sdoc, query, base) ?: return null
 
-    // ✅ POST View=1 لإظهار قائمة السيرفرات (السر الأساسي)
     val doc = try {
         val d = Jsoup.parse(postHtml(movieUrl, "$base/"), movieUrl)
         if (d.selectFirst("ul.serversList, div.ServersList, .donwload-servers-list, [data-link]") != null) d
@@ -297,7 +308,6 @@ private suspend fun resolveEgyDead(query: String): Map<String, String>? {
     }
 
     val cand = mutableListOf<String>()
-    // سيليكترات السيرفرات الصحيحة (من arprov EgyDeadProvider)
     doc.select("ul.serversList [data-link], div.ServersList [data-link], ul.serversList > li, div.ServersList li").forEach { el ->
         val u = el.attr("data-link").trim().ifEmpty { el.attr("href").trim() }
         if (u.isNotEmpty() && !u.startsWith("javascript")) cand.add(u)
@@ -317,10 +327,11 @@ private suspend fun resolveEgyDead(query: String): Map<String, String>? {
         val lower = link.lowercase()
         val r = when {
             lower.contains("/iframe/") || lower.contains("/download/") || lower.contains("megamax") -> resolveMegaMax(link)
+            host.contains("mixdrop") -> resolveMixDrop(link)
             host.contains("streamruby") || host.contains("stmruby") -> resolveStreamRuby(link)
             STREAMHG_EMBED_HOSTS.any { host.endsWith(it) } || link.contains("streamwish") -> {
                 val fid = link.substringAfterLast('/').substringBefore('?')
-                if (fid.isNotEmpty()) resolveStreamHg(fid) else null
+                if (fid.isNotEmpty()) resolveStreamHg(fid, link) else null
             }
             else -> null
         }
@@ -384,9 +395,7 @@ fun main() {
                     val movieUrl = findMovieLink(doc, name, base)
                     val servers = mutableListOf<String>()
                     if (movieUrl != null) {
-                        // GET
                         try { Jsoup.parse(fetchHtml(movieUrl, "$base/"), movieUrl).select("li[data-link], li[data-src], iframe[src]").forEach { servers.add(it.attr("data-link").ifBlank { it.attr("data-src") }.ifBlank { it.absUrl("src") }) } } catch (_: Exception) {}
-                        // ✅ POST View=1
                         try {
                             val d = Jsoup.parse(postHtml(movieUrl, "$base/"), movieUrl)
                             d.select("ul.serversList [data-link], div.ServersList [data-link], .donwload-servers-list a, iframe[src]").forEach {
