@@ -23,7 +23,6 @@ private const val UA =
 private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
 private var BASE = ARABSEED_DOMAINS.first()
 
-// بوابات أكوام (من arprov + النطاق الذي أكدته أنت)
 private val AKWAM_GATEWAYS = listOf("https://akwams.org", "https://akwam.ss")
 
 private val httpClient = HttpClient(OkHttp) {
@@ -85,7 +84,6 @@ private suspend fun resolveFinalBase(): String {
     return host
 }
 
-// ✅ نفس حركة عربسيد لأكوام: بوابة → redirects → أغلبية الروابط → كاش
 private var cachedAkwamBase: Pair<String, Long>? = null
 private suspend fun resolveAkwamBase(): String {
     val now = System.currentTimeMillis()
@@ -151,7 +149,7 @@ private fun findMovieLink(doc: Document, query: String, base: String): String? {
 private fun hexToUrl(hex: String): String =
     hex.chunked(2).joinToString("") { it.toInt(16).toChar().toString() }
 
-// ===== فك Packer (لمضيفات أكوام StreamWish / StreamRuby) =====
+// ===== فك Packer =====
 private const val PACKER_HEADER = "eval(function(p,a,c,k,e,d){while(c--)if(k[c])p=p.replace(new RegExp('\\\\b'+c.toString(a)+'\\\\b','g'),k[c]);return p}('"
 private const val PACKER_SPLIT_END = "'.split('|'))"
 private fun unpackPacker(html: String): String? {
@@ -186,17 +184,41 @@ private suspend fun resolveStreamRuby(embedUrl: String): Pair<String, String>? =
     if (m3u8 != null) m3u8 to embedUrl else null
 } catch (_: Exception) { null }
 
+// ✅ جديد: DoodStream
+private suspend fun resolveDood(embedUrl: String): Pair<String, String>? {
+    return try {
+        val page = fetchHtml(embedUrl, embedUrl)
+        val pass = Regex("/pass_md5/[^'\"\\s]+").find(page)?.value ?: return null
+        val token = Regex("[?&]token=([a-zA-Z0-9]+)").find(page)?.groupValues?.get(1)
+            ?: Regex("token\\s*[:=]\\s*['\"]([a-zA-Z0-9]+)").find(page)?.groupValues?.get(1) ?: return null
+        val host = URI(embedUrl).let { "${it.scheme}://${it.host}" }
+        val md5 = fetchHtml("$host$pass", embedUrl).trim()
+        val rand = (1..10).map { "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".random() }.joinToString("")
+        val sep = if (md5.endsWith("?")) "&" else "?"
+        (md5 + rand + sep + "token=$token&expiry=${System.currentTimeMillis()}") to host
+    } catch (_: Exception) { null }
+}
+// ✅ جديد: MixDrop
+private suspend fun resolveMixDrop(embedUrl: String): Pair<String, String>? {
+    return try {
+        val page = fetchHtml(embedUrl, embedUrl)
+        val unpacked = unpackPacker(page) ?: page
+        val wurl = Regex("""wurl\s*=\s*["']([^"']+)["']""").find(unpacked)?.groupValues?.get(1) ?: return null
+        val url = if (wurl.startsWith("//")) "https:$wurl" else wurl
+        url to embedUrl
+    } catch (_: Exception) { null }
+}
+
 // ===== استخراج أكوام =====
 private suspend fun resolveAkwam(query: String): Map<String, String>? {
     val base = resolveAkwamBase()
     val searchHtml = fetchHtml("$base/search?q=" + query.trim().replace(" ", "+"), "$base/")
     val doc = Jsoup.parse(searchHtml, base)
+    // ✅ إصلاح: لا نسقط لأول صندوق (تجنب فيلم خاطئ) — لا تطابق = null
     val box = doc.select("div.entry-box").firstOrNull { el ->
         val href = el.selectFirst("a.box, a")?.absUrl("href") ?: return@firstOrNull false
         !href.contains("/games/") && !href.contains("/programs/") &&
             (el.selectFirst("picture > img, img")?.attr("alt") ?: el.selectFirst("h3, .entry-title")?.text() ?: "").contains(query, true)
-    } ?: doc.select("div.entry-box").firstOrNull { el ->
-        val h = el.selectFirst("a.box, a")?.absUrl("href") ?: ""; h.isNotEmpty() && !h.contains("/games/") && !h.contains("/programs/")
     }
     val movieUrl = box?.selectFirst("a.box, a")?.absUrl("href") ?: return null
     val baseUrl = movieUrl.trimEnd('/')
@@ -209,11 +231,18 @@ private suspend fun resolveAkwam(query: String): Map<String, String>? {
     for (c in cand.distinct()) {
         val host = try { URI(c).host?.removePrefix("www.") ?: "" } catch (_: Exception) { "" }
         val r = when {
+            host.contains("dood") -> resolveDood(c)
+            host.contains("mixdrop") -> resolveMixDrop(c)
             host.contains("streamwish") || host.contains("hgcloud") || host.contains("hglink") || host.contains("hanerix") || host.contains("vibuxer") || host.contains("hgplaycdn") || host.contains("strwish") || host.contains("awish") || host.contains("dwish") || host.contains("mwish") -> resolveStreamWish(c)
             host.contains("streamruby") || host.contains("stmruby") -> resolveStreamRuby(c)
             else -> null
         }
-        if (r != null) return mapOf("source" to "akwam", "kind" to "m3u8", "url" to r.first, "referer" to r.second)
+        if (r != null) return mapOf(
+            "source" to "akwam",
+            "kind" to (if (r.first.contains(".m3u8")) "m3u8" else "video"),
+            "url" to r.first,
+            "referer" to r.second
+        )
     }
     return null
 }
@@ -235,7 +264,6 @@ fun main() {
                 }
             }
 
-            // 🧪 اختبار بوابات أكوام + النطاق الحي المكتشف من Render
             get("/api/test-akwam") {
                 val results = mutableListOf<String>()
                 for (g in AKWAM_GATEWAYS) {
@@ -253,19 +281,17 @@ fun main() {
                 call.respondText("{\"gateways\":[${results.joinToString(",")}],\"resolvedBase\":$resolved}", ContentType.Application.Json)
             }
 
-            // 🧪 استخراج أكوام كامل (للاختبار قبل ربط fallback)
             get("/api/akwam") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
                     val r = resolveAkwam(name)
                     if (r == null) { call.respondText("{\"success\":false,\"error\":\"AKWAM_NO_LINK\"}", ContentType.Application.Json); return@get }
-                    call.respondText("{\"success\":true,\"source\":\"akwam\",\"kind\":\"m3u8\",\"m3u8\":\"${jsonEscape(r["url"]!!)}\",\"referer\":\"${jsonEscape(r["referer"]!!)}\"}", ContentType.Application.Json)
+                    call.respondText("{\"success\":true,\"source\":\"akwam\",\"kind\":\"${r["kind"]}\",\"m3u8\":\"${jsonEscape(r["url"]!!)}\",\"referer\":\"${jsonEscape(r["referer"]!!)}\"}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"success\":false,\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
             }
 
-            // 🔍 تشخيص أكوام: يعرض نتائج البحث + المضيفات الموجودة فعلاً
             get("/api/debug-akwam") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
