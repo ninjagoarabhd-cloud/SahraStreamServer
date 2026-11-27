@@ -23,6 +23,9 @@ private const val UA =
 private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
 private var BASE = ARABSEED_DOMAINS.first()
 
+// بوابات أكوام (من arprov + النطاق الذي أكدته أنت)
+private val AKWAM_GATEWAYS = listOf("https://akwams.org", "https://akwam.ss")
+
 private val httpClient = HttpClient(OkHttp) {
     engine {
         config {
@@ -59,17 +62,14 @@ private suspend fun resolveFinalBase(): String {
     synchronized(BASE_LOCK) {
         cachedFinalBase?.let { (base, ts) -> if (now - ts < 600_000) return base }
     }
-
     val resp = httpClient.get("$BASE/")
     val finalUrl = resp.request.url.toString()
     var host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { BASE }
-
     val body = resp.bodyAsText()
     val low = body.lowercase()
     if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) {
         throw IllegalStateException("CLOUDFLARE on final base $host")
     }
-
     val doc = Jsoup.parse(body, host)
     val counts = mutableMapOf<String, Int>()
     doc.select("a[href]").forEach { a ->
@@ -80,15 +80,41 @@ private suspend fun resolveFinalBase(): String {
         }
     }
     val top = counts.maxByOrNull { it.value }?.key
-    if (top != null && top != host && (counts[top] ?: 0) >= 5) {
-        host = top
-    }
-
-    synchronized(BASE_LOCK) {
-        cachedFinalBase = host to now
-        BASE = host
-    }
+    if (top != null && top != host && (counts[top] ?: 0) >= 5) host = top
+    synchronized(BASE_LOCK) { cachedFinalBase = host to now; BASE = host }
     return host
+}
+
+// ✅ نفس حركة عربسيد لأكوام: بوابة → redirects → أغلبية الروابط → كاش
+private var cachedAkwamBase: Pair<String, Long>? = null
+private suspend fun resolveAkwamBase(): String {
+    val now = System.currentTimeMillis()
+    cachedAkwamBase?.let { (b, ts) -> if (now - ts < 600_000) return b }
+    for (g in AKWAM_GATEWAYS) {
+        try {
+            val resp = httpClient.get("$g/")
+            val finalUrl = resp.request.url.toString()
+            var host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { g }
+            val body = resp.bodyAsText()
+            val low = body.lowercase()
+            if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) continue
+            if (body.length < 500) continue
+            val doc = Jsoup.parse(body, host)
+            val counts = mutableMapOf<String, Int>()
+            doc.select("a[href]").forEach { a ->
+                val href = a.absUrl("href")
+                if (href.startsWith("http")) {
+                    val h = try { URI(href).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { null }
+                    if (h != null) counts[h] = (counts[h] ?: 0) + 1
+                }
+            }
+            val top = counts.maxByOrNull { it.value }?.key
+            if (top != null && top != host && (counts[top] ?: 0) >= 5) host = top
+            cachedAkwamBase = host to now
+            return host
+        } catch (_: Exception) {}
+    }
+    throw IllegalStateException("AKWAM_ALL_GATEWAYS_FAILED")
 }
 
 private suspend fun fetchHtml(url: String, referer: String? = null): String {
@@ -125,6 +151,73 @@ private fun findMovieLink(doc: Document, query: String, base: String): String? {
 private fun hexToUrl(hex: String): String =
     hex.chunked(2).joinToString("") { it.toInt(16).toChar().toString() }
 
+// ===== فك Packer (لمضيفات أكوام StreamWish / StreamRuby) =====
+private const val PACKER_HEADER = "eval(function(p,a,c,k,e,d){while(c--)if(k[c])p=p.replace(new RegExp('\\\\b'+c.toString(a)+'\\\\b','g'),k[c]);return p}('"
+private const val PACKER_SPLIT_END = "'.split('|'))"
+private fun unpackPacker(html: String): String? {
+    val start = html.indexOf(PACKER_HEADER); if (start < 0) return null
+    val end = html.indexOf(PACKER_SPLIT_END, start); if (end < 0) return null
+    val sepStart = html.lastIndexOf("',", end); if (sepStart < start) return null
+    val sep = html.substring(sepStart + 2, end)
+    val m = Regex("^(\\d+),(\\d+),'([\\s\\S]*)$").find(sep) ?: return null
+    val a = m.groupValues[1].toInt(); val c = m.groupValues[2].toInt()
+    val k = m.groupValues[3].split("|"); if (c > k.size) return null
+    var p = html.substring(start + PACKER_HEADER.length, sepStart)
+    for (i in c - 1 downTo 0) { val ki = k.getOrNull(i) ?: continue; if (ki.isEmpty()) continue; p = p.replace(Regex("\\b" + i.toString(a) + "\\b"), ki) }
+    return p
+}
+private suspend fun resolveStreamWish(embedUrl: String): Pair<String, String>? = try {
+    val page = fetchHtml(embedUrl, embedUrl)
+    val unpacked = unpackPacker(page) ?: page
+    val block = Regex("var links=\\{([\\s\\S]*?)\\};").find(unpacked)?.groupValues?.get(1)
+    fun lv(n: String) = block?.let { Regex("\"$n\":\"([^\"]*)\"").find(it)?.groupValues?.get(1) }
+    val raw = lv("hls4") ?: lv("hls2") ?: lv("hls3")
+        ?: Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpacked)?.groupValues?.get(1)
+    if (raw != null) {
+        val url = if (raw.startsWith("http")) raw else "https://" + URI(embedUrl).host + raw
+        url to embedUrl
+    } else null
+} catch (_: Exception) { null }
+private suspend fun resolveStreamRuby(embedUrl: String): Pair<String, String>? = try {
+    val page = fetchHtml(embedUrl, embedUrl)
+    val unpacked = unpackPacker(page) ?: page
+    val m3u8 = Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpacked)?.groupValues?.get(1)
+        ?: Regex("""https?://[^\s"'<>]+\.m3u8[^\s"'<>]*""").find(unpacked)?.groupValues?.get(0)
+    if (m3u8 != null) m3u8 to embedUrl else null
+} catch (_: Exception) { null }
+
+// ===== استخراج أكوام =====
+private suspend fun resolveAkwam(query: String): Map<String, String>? {
+    val base = resolveAkwamBase()
+    val searchHtml = fetchHtml("$base/search?q=" + query.trim().replace(" ", "+"), "$base/")
+    val doc = Jsoup.parse(searchHtml, base)
+    val box = doc.select("div.entry-box").firstOrNull { el ->
+        val href = el.selectFirst("a.box, a")?.absUrl("href") ?: return@firstOrNull false
+        !href.contains("/games/") && !href.contains("/programs/") &&
+            (el.selectFirst("picture > img, img")?.attr("alt") ?: el.selectFirst("h3, .entry-title")?.text() ?: "").contains(query, true)
+    } ?: doc.select("div.entry-box").firstOrNull { el ->
+        val h = el.selectFirst("a.box, a")?.absUrl("href") ?: ""; h.isNotEmpty() && !h.contains("/games/") && !h.contains("/programs/")
+    }
+    val movieUrl = box?.selectFirst("a.box, a")?.absUrl("href") ?: return null
+    val baseUrl = movieUrl.trimEnd('/')
+    val cand = mutableListOf<String>()
+    try { Jsoup.parse(fetchHtml("$baseUrl/watch", baseUrl), "$baseUrl/watch").select("iframe[src]").forEach { val s = it.absUrl("src"); if (s.startsWith("http") && !s.contains("ads") && !s.contains("facebook")) cand.add(s) } } catch (_: Exception) {}
+    try {
+        val mirror = Regex("(?i)(mixdrop|dood|streamruby|send\\.cm|uqload|streamwish|byseraguci|vidhide|voe|hgcloud|mp4upload|vidmoly)")
+        Jsoup.parse(fetchHtml("$baseUrl/download", baseUrl), "$baseUrl/download").select("a[href]").forEach { val h = it.absUrl("href"); if (h.startsWith("http") && mirror.containsMatchIn(h)) cand.add(h) }
+    } catch (_: Exception) {}
+    for (c in cand.distinct()) {
+        val host = try { URI(c).host?.removePrefix("www.") ?: "" } catch (_: Exception) { "" }
+        val r = when {
+            host.contains("streamwish") || host.contains("hgcloud") || host.contains("hglink") || host.contains("hanerix") || host.contains("vibuxer") || host.contains("hgplaycdn") || host.contains("strwish") || host.contains("awish") || host.contains("dwish") || host.contains("mwish") -> resolveStreamWish(c)
+            host.contains("streamruby") || host.contains("stmruby") -> resolveStreamRuby(c)
+            else -> null
+        }
+        if (r != null) return mapOf("source" to "akwam", "kind" to "m3u8", "url" to r.first, "referer" to r.second)
+    }
+    return null
+}
+
 private val watchCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
 
 fun main() {
@@ -142,6 +235,36 @@ fun main() {
                 }
             }
 
+            // 🧪 اختبار بوابات أكوام + النطاق الحي المكتشف من Render
+            get("/api/test-akwam") {
+                val results = mutableListOf<String>()
+                for (g in AKWAM_GATEWAYS) {
+                    try {
+                        val resp = httpClient.get("$g/")
+                        val body = resp.bodyAsText()
+                        val low = body.lowercase()
+                        val challenge = low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")
+                        results.add("{\"gateway\":\"$g\",\"code\":${resp.status.value},\"len\":${body.length},\"challenge\":$challenge}")
+                    } catch (e: Exception) {
+                        results.add("{\"gateway\":\"$g\",\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}")
+                    }
+                }
+                val resolved = try { "\"${resolveAkwamBase()}\"" } catch (e: Exception) { "null" }
+                call.respondText("{\"gateways\":[${results.joinToString(",")}],\"resolvedBase\":$resolved}", ContentType.Application.Json)
+            }
+
+            // 🧪 استخراج أكوام كامل (للاختبار قبل ربط fallback)
+            get("/api/akwam") {
+                val name = call.request.queryParameters["name"] ?: "Inception"
+                try {
+                    val r = resolveAkwam(name)
+                    if (r == null) { call.respondText("{\"success\":false,\"error\":\"AKWAM_NO_LINK\"}", ContentType.Application.Json); return@get }
+                    call.respondText("{\"success\":true,\"source\":\"akwam\",\"kind\":\"m3u8\",\"m3u8\":\"${jsonEscape(r["url"]!!)}\",\"referer\":\"${jsonEscape(r["referer"]!!)}\"}", ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"success\":false,\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
             get("/api/debug-search") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
@@ -154,16 +277,11 @@ fun main() {
                     }
                     val html = resp.bodyAsText()
                     val doc = Jsoup.parse(html, base)
-
                     val allLinks = doc.select("a[href]").take(50).map { a ->
-                        val href = a.absUrl("href")
-                        val txt = a.text().take(80)
-                        "$href | $txt"
+                        val href = a.absUrl("href"); val txt = a.text().take(80); "$href | $txt"
                     }
-
                     val containsQuery = html.lowercase().contains(name.lowercase())
                     val movieUrl = findMovieLink(doc, name, base)
-
                     val json = "{" +
                         "\"status\":${resp.status.value}," +
                         "\"finalBase\":\"${jsonEscape(base)}\"," +
@@ -180,7 +298,6 @@ fun main() {
                 }
             }
 
-            // ⚡ التعديل: تخطي صفحة الفيلم عندما يكون رابط المشاهدة متوقعاً
             get("/api/watch") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 val now = System.currentTimeMillis()
@@ -192,22 +309,17 @@ fun main() {
                     val searchHtml = fetchHtml("$base/?s=" + name.trim().replace(" ", "+"), "$base/")
                     val movieUrl = findMovieLink(Jsoup.parse(searchHtml, base), name, base)
                     if (movieUrl == null) { call.respondText("{\"success\":false,\"error\":\"NO_MOVIE_LINK\"}", ContentType.Application.Json); return@get }
-
-                    // ⚡ جرّب رابط المشاهدة المباشر أولاً (يوفر طلب صفحة الفيلم ~1 ثانية)
                     val guess = movieUrl.trimEnd('/') + "/watch"
                     var watchUrl = guess
                     var watchDoc: Document? = try {
                         val d = Jsoup.parse(fetchHtml(guess, movieUrl), guess)
                         if (d.selectFirst("iframe#videoIframe") != null) d else null
                     } catch (_: Exception) { null }
-
-                    // إن فشل الرابط المباشر، ارجع للطريقة القديمة (جلب صفحة الفيلم)
                     if (watchDoc == null) {
                         val movieHtml = fetchHtml(movieUrl, "$base/")
                         watchUrl = Jsoup.parse(movieHtml, movieUrl).selectFirst("a.watch__btn")?.absUrl("href") ?: guess
                         watchDoc = Jsoup.parse(fetchHtml(watchUrl, movieUrl), watchUrl)
                     }
-
                     val playUrl = watchDoc.selectFirst("iframe#videoIframe")?.absUrl("src")
                     if (playUrl == null) { call.respondText("{\"success\":false,\"error\":\"NO_IFRAME\"}", ContentType.Application.Json); return@get }
                     val altServers = watchDoc.select("#watch li[data-link]").mapNotNull { it.attr("data-link").takeIf { s -> s.isNotBlank() } }
