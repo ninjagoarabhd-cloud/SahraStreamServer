@@ -265,6 +265,54 @@ fun main() {
                 }
             }
 
+            // 🔍 تشخيص أكوام: يعرض نتائج البحث + المضيفات الموجودة فعلاً
+            get("/api/debug-akwam") {
+                val name = call.request.queryParameters["name"] ?: "Inception"
+                try {
+                    val base = resolveAkwamBase()
+                    val searchUrl = "$base/search?q=" + name.trim().replace(" ", "+")
+                    val html = fetchHtml(searchUrl, "$base/")
+                    val doc = Jsoup.parse(html, base)
+                    val boxes = doc.select("div.entry-box")
+                    val boxInfo = boxes.take(5).map { el ->
+                        val t = el.selectFirst("picture > img, img")?.attr("alt") ?: el.selectFirst("h3, .entry-title")?.text() ?: ""
+                        val h = el.selectFirst("a.box, a")?.absUrl("href") ?: ""
+                        "{\"title\":\"${jsonEscape(t)}\",\"href\":\"${jsonEscape(h)}\"}"
+                    }
+                    val box = boxes.firstOrNull { el ->
+                        val href = el.selectFirst("a.box, a")?.absUrl("href") ?: return@firstOrNull false
+                        !href.contains("/games/") && !href.contains("/programs/") &&
+                            (el.selectFirst("picture > img, img")?.attr("alt") ?: el.selectFirst("h3, .entry-title")?.text() ?: "").contains(name, true)
+                    } ?: boxes.firstOrNull { el ->
+                        val h = el.selectFirst("a.box, a")?.absUrl("href") ?: ""; h.isNotEmpty() && !h.contains("/games/") && !h.contains("/programs/")
+                    }
+                    val movieUrl = box?.selectFirst("a.box, a")?.absUrl("href")
+                    val watchIframes = mutableListOf<String>()
+                    val mirrors = mutableListOf<String>()
+                    if (movieUrl != null) {
+                        val b = movieUrl.trimEnd('/')
+                        try { Jsoup.parse(fetchHtml("$b/watch", b), "$b/watch").select("iframe[src]").forEach { watchIframes.add(it.absUrl("src")) } } catch (_: Exception) {}
+                        try {
+                            val mr = Regex("(?i)(mixdrop|dood|streamruby|send\\.cm|uqload|streamwish|byseraguci|vidhide|voe|hgcloud|mp4upload|vidmoly)")
+                            Jsoup.parse(fetchHtml("$b/download", b), "$b/download").select("a[href]").forEach { val h = it.absUrl("href"); if (mr.containsMatchIn(h)) mirrors.add(h) }
+                        } catch (_: Exception) {}
+                    }
+                    val json = "{" +
+                        "\"base\":\"${jsonEscape(base)}\"," +
+                        "\"htmlLen\":${html.length}," +
+                        "\"containsQuery\":${html.lowercase().contains(name.lowercase())}," +
+                        "\"boxCount\":${boxes.size}," +
+                        "\"boxes\":[${boxInfo.joinToString(",")}]," +
+                        "\"movieUrl\":" + (if (movieUrl != null) "\"${jsonEscape(movieUrl)}\"" else "null") + "," +
+                        "\"watchIframes\":[${watchIframes.joinToString(",") { "\"${jsonEscape(it)}\"" }}]," +
+                        "\"downloadMirrors\":[${mirrors.joinToString(",") { "\"${jsonEscape(it)}\"" }}]" +
+                        "}"
+                    call.respondText(json, ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
             get("/api/debug-search") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
