@@ -30,7 +30,8 @@ private val EGYDEAD_GATEWAYS = listOf("https://tv10.egydead.live")
 private val MYCIMA_GATEWAYS = listOf(
     "https://mycima.gdn",
     "https://mycima.agency",
-    "https://mycima.study"
+    "https://mycima.study",
+    "https://mycima.house"
 )
 
 private val httpClient = HttpClient(OkHttp) {
@@ -597,7 +598,6 @@ fun main() {
                 }
             }
 
-            // 🔍 تشخيص بنية البحث في mycima.gdn
             get("/api/debug-mycima-search") {
                 val name = call.request.queryParameters["name"] ?: "Inception"
                 try {
@@ -645,6 +645,41 @@ fun main() {
                         "\"sampleAroundQuery\":\"${jsonEscape(sample)}\"" +
                         "}"
                     call.respondText(json, ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // 🔍 اختبار RSS feed على mycima.house (الكنز المكتشف)
+            get("/api/debug-mycima-rss") {
+                val name = call.request.queryParameters["name"] ?: "Inception"
+                try {
+                    val encoded = java.net.URLEncoder.encode(name.trim(), "UTF-8")
+                    val candidates = listOf(
+                        "https://mycima.house/search/$encoded/feed/rss/",
+                        "https://mycima.house/search/$encoded/feed/",
+                        "https://mycima.gdn/search/$encoded/feed/rss/"
+                    )
+                    val results = mutableListOf<String>()
+                    for (u in candidates) {
+                        try {
+                            val resp = httpClient.get(u) { header("User-Agent", UA) }
+                            val body = resp.bodyAsText()
+                            val low = body.lowercase()
+                            val isRss = low.contains("<rss") || low.contains("<item") || low.contains("<feed")
+                            val itemCount = Regex("<item[ >]").findAll(body).count()
+                            val links = Regex("<link>([^<]+)</link>").findAll(body)
+                                .map { it.groupValues[1].trim() }
+                                .filter { it.contains("http") }
+                                .take(4)
+                                .map { "\"${jsonEscape(it.take(120))}\"" }
+                            val title = Regex("<title>([^<]+)</title>").find(body)?.groupValues?.get(1)?.trim() ?: ""
+                            results.add("{\"url\":\"${jsonEscape(u)}\",\"code\":${resp.status.value},\"len\":${body.length},\"isRss\":$isRss,\"itemCount\":$itemCount,\"title\":\"${jsonEscape(title.take(60))}\",\"links\":[$links]}")
+                        } catch (e: Exception) {
+                            results.add("{\"url\":\"${jsonEscape(u)}\",\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}")
+                        }
+                    }
+                    call.respondText("{\"results\":[$results]}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
