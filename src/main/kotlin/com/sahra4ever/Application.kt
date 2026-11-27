@@ -16,6 +16,8 @@ import io.ktor.server.routing.*
 import org.jsoup.Jsoup
 import org.jsoup.nodes.Document
 import java.net.URI
+import java.net.URLDecoder
+import java.util.Base64
 
 private const val UA =
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
@@ -24,6 +26,13 @@ private val ARABSEED_DOMAINS = listOf("https://arabseed.trade")
 private var BASE = ARABSEED_DOMAINS.first()
 
 private val EGYDEAD_GATEWAYS = listOf("https://tv10.egydead.live")
+
+// 🆕 MyCima domain pool (من arprov)
+private val MYCIMA_GATEWAYS = listOf(
+    "https://mycima.gdn",
+    "https://mycima.agency",
+    "https://mycima.study"
+)
 
 private val httpClient = HttpClient(OkHttp) {
     engine {
@@ -113,6 +122,30 @@ private suspend fun resolveEgyDeadBase(): String {
         } catch (_: Exception) {}
     }
     throw IllegalStateException("EGYDEAD_ALL_GATEWAYS_FAILED")
+}
+
+// 🆕 MyCima: بوابة + كاش (نفس نمط EgyDead)
+private var cachedMyCimaBase: Pair<String, Long>? = null
+private suspend fun resolveMyCimaBase(): String {
+    val now = System.currentTimeMillis()
+    cachedMyCimaBase?.let { (b, ts) -> if (now - ts < 600_000) return b }
+    for (g in MYCIMA_GATEWAYS) {
+        try {
+            val resp = httpClient.get("$g/") {
+                header("User-Agent", UA)
+                header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+            }
+            val finalUrl = resp.request.url.toString()
+            var host = try { URI(finalUrl).let { "${it.scheme}://${it.host}" } } catch (_: Exception) { g }
+            val body = resp.bodyAsText()
+            val low = body.lowercase()
+            if (low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")) continue
+            if (body.length < 500) continue
+            cachedMyCimaBase = host to now
+            return host
+        } catch (_: Exception) {}
+    }
+    throw IllegalStateException("MYCIMA_ALL_GATEWAYS_FAILED")
 }
 
 private suspend fun fetchHtml(url: String, referer: String? = null): String {
@@ -342,6 +375,16 @@ private suspend fun resolveEgyDead(query: String): Map<String, String>? {
     return null
 }
 
+// 🆕 MyCima: دالة decodeHex (نفس hexToUrl لكن للعناوين العامة)
+private fun decodeHexStr(hex: String): String = try {
+    val sb = StringBuilder()
+    for (i in 0 until hex.length step 2) {
+        val byte = hex.substring(i, i + 2)
+        sb.append(byte.toInt(16).toChar())
+    }
+    sb.toString()
+} catch (_: Exception) { "" }
+
 private val watchCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
 
 fun main() {
@@ -382,7 +425,6 @@ fun main() {
                 }
             }
 
-            // 🧪 تشخيص مضيف فردي (hgcloud/mixdrop/etc)
             get("/api/debug-host") {
                 val url = call.request.queryParameters["url"]
                 if (url.isNullOrBlank()) { call.respondText("{\"error\":\"no url\"}", ContentType.Application.Json); return@get }
@@ -432,6 +474,140 @@ fun main() {
                         } catch (_: Exception) {}
                     }
                     call.respondText("{\"base\":\"${jsonEscape(base)}\",\"containsQuery\":${html.lowercase().contains(name.lowercase())},\"movieUrl\":" + (if (movieUrl != null) "\"${jsonEscape(movieUrl)}\"" else "null") + ",\"links\":[${links.joinToString(",")}],\"servers\":[${servers.joinToString(",") { "\"${jsonEscape(it)}\"" }}]}", ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // =====================================================
+            // 🆕 MYCIMA — المرحلة 1: اختبار البنية التحتية
+            // =====================================================
+
+            // 1️⃣ اختبار البوابات الثلاث
+            get("/api/test-mycima") {
+                val results = mutableListOf<String>()
+                for (g in MYCIMA_GATEWAYS) {
+                    try {
+                        val resp = httpClient.get("$g/") {
+                            header("User-Agent", UA)
+                            header("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8")
+                        }
+                        val body = resp.bodyAsText()
+                        val low = body.lowercase()
+                        val challenge = low.contains("just a moment") || low.contains("challenge-platform") || low.contains("cf-chl")
+                        val blocked = body.contains("verifying you are not a bot", true) || body.contains("checking your browser", true)
+                        results.add("{\"gateway\":\"$g\",\"code\":${resp.status.value},\"len\":${body.length},\"challenge\":$challenge,\"blocked\":$blocked}")
+                    } catch (e: Exception) {
+                        results.add("{\"gateway\":\"$g\",\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}")
+                    }
+                }
+                val resolved = try { "\"${resolveMyCimaBase()}\"" } catch (e: Exception) { "null" }
+                call.respondText("{\"gateways\":[${results.joinToString(",")}],\"resolvedBase\":$resolved}", ContentType.Application.Json)
+            }
+
+            // 2️⃣ تشخيص شامل: بحث + صفحة فيلم + استخراج URLs + اختبار AJAX
+            get("/api/debug-mycima") {
+                val name = call.request.queryParameters["name"] ?: "Inception"
+                try {
+                    val base = resolveMyCimaBase()
+                    val encoded = java.net.URLEncoder.encode(name.trim(), "UTF-8")
+                    val searchUrl = "$base/?s=$encoded"
+                    val searchHtml = fetchHtml(searchUrl, "$base/")
+                    val sdoc = Jsoup.parse(searchHtml, base)
+
+                    // نتائج البحث (GridItems)
+                    val searchResults = sdoc.select("div#MainFiltar > .GridItem, .GridItem").take(5).mapNotNull { el ->
+                        val a = el.selectFirst("a") ?: return@mapNotNull null
+                        val title = a.selectFirst("strong")?.text()?.trim() ?: a.attr("title").trim()
+                        val href = a.absUrl("href")
+                        if (title.isBlank() || href.isBlank()) return@mapNotNull null
+                        "{\"title\":\"${jsonEscape(title)}\",\"href\":\"${jsonEscape(href)}\"}"
+                    }
+
+                    // اختيار أول فيلم مطابق
+                    val movieUrl = sdoc.select("div#MainFiltar > .GridItem, .GridItem").mapNotNull { el ->
+                        val a = el.selectFirst("a") ?: return@mapNotNull null
+                        val title = a.selectFirst("strong")?.text()?.trim() ?: a.attr("title").trim()
+                        val href = a.absUrl("href")
+                        if (href.isBlank()) return@mapNotNull null
+                        if (title.contains(name, true) || href.contains(name.replace(" ", "-"), true)) href else null
+                    }.firstOrNull()
+
+                    // جلب صفحة الفيلم إن وُجدت
+                    var movieInfo: String = "null"
+                    var ajaxTest: String = "null"
+                    var iframeCount = 0
+                    var dataIdCount = 0
+                    var dataWatchCount = 0
+                    var embedUrls = mutableListOf<String>()
+                    var playUrls = mutableListOf<String>()
+                    var mohixFound: String? = null
+
+                    if (movieUrl != null) {
+                        try {
+                            val movieHtml = fetchHtml(movieUrl, "$base/")
+                            val mdoc = Jsoup.parse(movieHtml, movieUrl)
+                            iframeCount = mdoc.select("iframe[src]").size
+                            dataIdCount = mdoc.select("[data-id]").size
+                            dataWatchCount = mdoc.select("[data-watch]").size
+
+                            // /e/EMBED_ID/
+                            Regex("""/e/(\d+)/?""").findAll(movieHtml).take(3).forEach {
+                                embedUrls.add("$base/e/${it.groupValues[1]}/")
+                            }
+                            // /play/BASE64
+                            Regex("""/play/([A-Za-z0-9+/=_-]+)""").findAll(movieHtml).take(3).forEach {
+                                val b64 = it.groupValues[1]
+                                try {
+                                    val decoded = String(Base64.getDecoder().decode(b64.replace("_", "/").replace("-", "+")))
+                                    playUrls.add(decoded)
+                                } catch (_: Exception) {
+                                    playUrls.add("DECODE_FAILED:$b64")
+                                }
+                            }
+                            // Mohix hex
+                            mohixFound = Regex("""(?:const|var)\s+Mohix\s*=\s*["']([0-9a-fA-F]+)["']""").find(movieHtml)?.groupValues?.get(1)
+
+                            movieInfo = "{\"htmlLen\":${movieHtml.length},\"iframeCount\":$iframeCount,\"dataIdCount\":$dataIdCount,\"dataWatchCount\":$dataWatchCount,\"mohixFound\":" +
+                                (if (mohixFound != null) "\"${jsonEscape(mohixFound!!.take(50))}\"" else "null") + "}"
+
+                            // اختبار AJAX على أول data-id
+                            val firstId = mdoc.select("[data-id]").firstOrNull()?.attr("data-id")
+                            if (!firstId.isNullOrBlank()) {
+                                try {
+                                    val ajaxUrl = "$base/wp-admin/admin-ajax.php"
+                                    val ajaxResp = httpClient.post(ajaxUrl) {
+                                        header("Referer", movieUrl)
+                                        header("X-Requested-With", "XMLHttpRequest")
+                                        header("Content-Type", "application/x-www-form-urlencoded")
+                                        setBody("action=get_player&server=$firstId")
+                                    }
+                                    val ajaxBody = ajaxResp.bodyAsText()
+                                    val ajaxDoc = Jsoup.parse(ajaxBody)
+                                    val iframeSrc = ajaxDoc.selectFirst("iframe")?.attr("src") ?: ""
+                                    ajaxTest = "{\"code\":${ajaxResp.status.value},\"len\":${ajaxBody.length},\"firstId\":\"$firstId\",\"iframeSrc\":\"${jsonEscape(iframeSrc.take(150))}\"}"
+                                } catch (e: Exception) {
+                                    ajaxTest = "{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}"
+                                }
+                            }
+                        } catch (e: Exception) {
+                            movieInfo = "{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}"
+                        }
+                    }
+
+                    val json = "{" +
+                        "\"base\":\"${jsonEscape(base)}\"," +
+                        "\"searchUrl\":\"${jsonEscape(searchUrl)}\"," +
+                        "\"searchHtmlLen\":${searchHtml.length}," +
+                        "\"containsQuery\":${searchHtml.lowercase().contains(name.lowercase())}," +
+                        "\"searchResults\":[${searchResults.joinToString(",")}]," +
+                        "\"movieUrl\":" + (if (movieUrl != null) "\"${jsonEscape(movieUrl)}\"" else "null") + "," +
+                        "\"movieInfo\":$movieInfo," +
+                        "\"embedUrls\":[${embedUrls.joinToString(",") { "\"${jsonEscape(it)}\"" }}]," +
+                        "\"playUrls\":[${playUrls.joinToString(",") { "\"${jsonEscape(it)}\"" }}]," +
+                        "\"ajaxTest\":$ajaxTest" +
+                        "}"
+                    call.respondText(json, ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
@@ -543,4 +719,4 @@ fun main() {
             }
         }
     }.start(wait = true)
-                                    }
+}
