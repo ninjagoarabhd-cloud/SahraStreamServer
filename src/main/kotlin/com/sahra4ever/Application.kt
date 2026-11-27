@@ -129,9 +129,6 @@ private suspend fun resolveEgyDeadBase(): String {
     throw IllegalStateException("EGYDEAD_ALL_GATEWAYS_FAILED")
 }
 
-// ⚠️ ملاحظة: حالياً resolveMyCimaBase يأخذ أول بوابة تعمل (200 + حجم > 5000)
-// لاحقاً سنحدّثها لتستخدم نفس منطق عرب سيد: تحليل أغلبية الروابط في الصفحة
-// لاكتشاف النطاق الحقيقي (مثل mycima.house الذي ظهر في RSS)
 private var cachedMyCimaBase: Pair<String, Long>? = null
 private suspend fun resolveMyCimaBase(): String {
     val now = System.currentTimeMillis()
@@ -738,7 +735,8 @@ fun main() {
                             val l = Regex("<link>([^<]*)</link>").find(blk)?.groupValues?.get(1)?.trim() ?: ""
                             t to l
                         }.toList()
-                    val movie = items.firstOrNull { (t, _) -> t.contains(name, true) } ?: items.firstOrNull()
+                    // ✅ الإصلاح: استخدام it.first بدلاً من تفكيك (t, _)
+                    val movie = items.firstOrNull { it.first.contains(name, true) } ?: items.firstOrNull()
                     if (movie == null) { call.respondText("{\"error\":\"NO_MOVIE_IN_RSS\"}", ContentType.Application.Json); return@get }
 
                     val movieHtml = fetchHtml(movie.second, "$base/")
@@ -772,10 +770,15 @@ fun main() {
                         } catch (e: Exception) { "{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}" }
                     } else "null"
 
+                    // ✅ الإصلاح: استخدام it.first/it.second بدلاً من تفكيك (t,l)
+                    val itemsJson = items.take(5).joinToString(",") {
+                        "\"${jsonEscape(it.first.take(50))} -> ${jsonEscape(it.second.take(100))}\""
+                    }
+
                     call.respondText("{" +
                         "\"base\":\"${jsonEscape(base)}\"," +
                         "\"rssUrl\":\"${jsonEscape(rssUrl)}\"," +
-                        "\"items\":[" + items.take(5).joinToString(",") { "(t,l) -> \"${jsonEscape(t.first.take(50))} -> ${jsonEscape(t.second.take(100))}\"" } + "]," +
+                        "\"items\":[$itemsJson]," +
                         "\"movieTitle\":\"${jsonEscape(movie.first.take(60))}\"," +
                         "\"movieUrl\":\"${jsonEscape(movie.second.take(150))}\"," +
                         "\"movieHtmlLen\":${movieHtml.length}," +
