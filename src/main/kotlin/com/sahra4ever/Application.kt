@@ -385,6 +385,76 @@ private fun decodeHexStr(hex: String): String = try {
     sb.toString()
 } catch (_: Exception) { "" }
 
+// ✅ فك Base64 آمن (لروابط data-watch المشفرة)
+private fun decodeB64Safe(s: String): String? = try {
+    String(Base64.getDecoder().decode(s))
+} catch (_: Exception) { null }
+
+// ✅ فك Packer مع تفضيل الرابط المطلق (hls2) بدل النسبي (hls4)
+private suspend fun resolvePackerM3u8(embedUrl: String): Pair<String, String>? = try {
+    val page = fetchHtml(embedUrl, embedUrl)
+    val unpacked = unpackPacker(page) ?: page
+    val block = Regex("var links=\\{([\\s\\S]*?)\\};").find(unpacked)?.groupValues?.get(1)
+    fun lv(n: String) = block?.let { Regex("\"$n\":\"([^\"]*)\"").find(it)?.groupValues?.get(1) }
+    val cands = listOfNotNull(lv("hls2"), lv("hls4"), lv("hls3"), lv("hls1"))
+    val abs = cands.firstOrNull { it.startsWith("http") && it.contains(".m3u8") }
+    val rel = cands.firstOrNull { it.contains(".m3u8") }
+    val raw = abs ?: rel
+        ?: Regex("""file\s*:\s*["']([^"']+\.m3u8[^"']*)["']""").find(unpacked)?.groupValues?.get(1)
+    if (raw != null) {
+        val url = if (raw.startsWith("http")) raw else "https://" + URI(embedUrl).host + raw
+        url to embedUrl
+    } else null
+} catch (_: Exception) { null }
+
+// ✅ المستخرج الكامل لـ MyCima: RSS بحث → صفحة الفيلم → dataWatch → فك المشغل
+private suspend fun resolveMyCima(query: String): Map<String, String>? {
+    val base = resolveMyCimaBase()
+    val enc = java.net.URLEncoder.encode(query.trim(), "UTF-8")
+    val rss = fetchHtml("$base/search/$enc/feed/", "$base/")
+    val items = Regex("<item[^>]*>([\\s\\S]*?)</item>").findAll(rss).map { m ->
+        val b = m.groupValues[1]
+        val t = Regex("<title>([^<]*)</title>").find(b)?.groupValues?.get(1)?.trim() ?: ""
+        val l = Regex("<link>([^<]*)</link>").find(b)?.groupValues?.get(1)?.trim() ?: ""
+        t to l
+    }.toList()
+    val movie = items.firstOrNull { it.first.contains(query, true) } ?: return null
+
+    val movieHtml = fetchHtml(movie.second, "$base/")
+    val mdoc = Jsoup.parse(movieHtml, movie.second)
+
+    val cand = mutableListOf<String>()
+    // 1) data-watch: فك Base64 (mycimafsd/mycimavsd) أو رابط مباشر
+    mdoc.select("[data-watch]").forEach { el ->
+        val v = el.attr("data-watch").trim()
+        val b64 = Regex("mycima(?:fsd|vsd|fs|vs)=([A-Za-z0-9+/=_-]+)").find(v)?.groupValues?.get(1)
+        val dec = b64?.let { decodeB64Safe(it) }
+        if (dec != null && dec.startsWith("http")) cand.add(dec)
+        else if (v.startsWith("http")) cand.add(v)
+    }
+    // 2) data-link / data-src
+    mdoc.select("[data-link],[data-src]").forEach { el ->
+        val v = (el.attr("data-link") + el.attr("data-src")).trim()
+        if (v.startsWith("http")) cand.add(v)
+    }
+    // 3) iframes خارجية
+    mdoc.select("iframe[src]").forEach { f ->
+        val s = f.absUrl("src")
+        if (s.startsWith("http") && !s.contains(base)) cand.add(s)
+    }
+
+    for (c in cand.distinct()) {
+        val r = resolvePackerM3u8(c) ?: resolveStreamWish(c) ?: resolveStreamRuby(c)
+        if (r != null) return mapOf(
+            "source" to "mycima",
+            "kind" to "m3u8",
+            "url" to r.first,
+            "referer" to r.second
+        )
+    }
+    return null
+}
+
 private val watchCache = java.util.concurrent.ConcurrentHashMap<String, Pair<String, Long>>()
 
 fun main() {
@@ -720,7 +790,6 @@ fun main() {
                 }
             }
 
-            // 🎬 اختبار صفحة فيلم حقيقية من RSS (يختبر البحث + صفحة الفيلم + السيرفرات)
             get("/api/debug-mycima-movie") {
                 val name = call.request.queryParameters["name"] ?: "Spider man"
                 try {
@@ -735,7 +804,6 @@ fun main() {
                             val l = Regex("<link>([^<]*)</link>").find(blk)?.groupValues?.get(1)?.trim() ?: ""
                             t to l
                         }.toList()
-                    // ✅ الإصلاح: استخدام it.first بدلاً من تفكيك (t, _)
                     val movie = items.firstOrNull { it.first.contains(name, true) } ?: items.firstOrNull()
                     if (movie == null) { call.respondText("{\"error\":\"NO_MOVIE_IN_RSS\"}", ContentType.Application.Json); return@get }
 
@@ -770,7 +838,6 @@ fun main() {
                         } catch (e: Exception) { "{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}" }
                     } else "null"
 
-                    // ✅ الإصلاح: استخدام it.first/it.second بدلاً من تفكيك (t,l)
                     val itemsJson = items.take(5).joinToString(",") {
                         "\"${jsonEscape(it.first.take(50))} -> ${jsonEscape(it.second.take(100))}\""
                     }
@@ -793,6 +860,18 @@ fun main() {
                         "}", ContentType.Application.Json)
                 } catch (e: Exception) {
                     call.respondText("{\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
+                }
+            }
+
+            // 🎬 MyCima: استخراج كامل (RSS → dataWatch → فك المشغل)
+            get("/api/mycima") {
+                val name = call.request.queryParameters["name"] ?: "Spider man"
+                try {
+                    val r = resolveMyCima(name)
+                    if (r == null) { call.respondText("{\"success\":false,\"error\":\"MYCIMA_NO_LINK\"}", ContentType.Application.Json); return@get }
+                    call.respondText("{\"success\":true,\"source\":\"mycima\",\"kind\":\"${r["kind"]}\",\"m3u8\":\"${jsonEscape(r["url"]!!)}\",\"referer\":\"${jsonEscape(r["referer"]!!)}\"}", ContentType.Application.Json)
+                } catch (e: Exception) {
+                    call.respondText("{\"success\":false,\"error\":\"${jsonEscape(e.message ?: "unknown")}\"}", ContentType.Application.Json)
                 }
             }
 
